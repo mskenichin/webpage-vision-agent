@@ -20,6 +20,10 @@ export async function POST(request: Request) {
   } catch (error) {
     store.setBrowser("ready");
     const message = error instanceof Error ? error.message : "操作を完了できませんでした。";
+    if (message === "AGENT_STOPPED") {
+      store.addMessage("system", "操作を停止しました。");
+      return NextResponse.json(store.snapshot());
+    }
     store.addMessage("system", `操作を停止しました: ${message}`);
     return NextResponse.json(store.snapshot(), { status: 502 });
   }

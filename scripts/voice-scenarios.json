@@ -1,0 +1,22 @@
+[
+  { "id": "S01", "utterance": "SUVを探すためにモデル一覧ページを表示して。", "tool": { "path": "/models/" } },
+  { "id": "S02", "utterance": "レクサスNXのページを見せて。", "tool": { "path": "/models/nx/" } },
+  { "id": "S03", "utterance": "RXとNXの違いを簡単に教えて。" },
+  { "id": "S04", "utterance": "予算七百万円前後でおすすめはありますか。" },
+  { "id": "S05", "utterance": "電気自動車のRZを開いて。", "tool": { "path": "/models/rz/" } },
+  { "id": "S06", "utterance": "小回りが利くモデルを教えてください。" },
+  { "id": "S07", "utterance": "LBXの詳細ページへ移動して。", "tool": { "path": "/models/lbx/" } },
+  { "id": "S08", "utterance": "後部座席が広い車を探しています。" },
+  { "id": "S09", "utterance": "燃費を重視するとどの車が良いですか。" },
+  { "id": "S10", "utterance": "レクサスLMを表示して。", "tool": { "path": "/models/lm/" } },
+  { "id": "S11", "utterance": "週末のアウトドアに向く車を教えて。" },
+  { "id": "S12", "utterance": "GXのモデルページを開いてください。", "tool": { "path": "/models/gx/" } },
+  { "id": "S13", "utterance": "静粛性が高いセダンはありますか。" },
+  { "id": "S14", "utterance": "レクサスESを見せて。", "tool": { "path": "/models/es/" } },
+  { "id": "S15", "utterance": "安全装備について短く説明して。" },
+  { "id": "S16", "utterance": "UXのページへ移動して。", "tool": { "path": "/models/ux/" } },
+  { "id": "S17", "utterance": "荷室が広いモデルを比較したいです。" },
+  { "id": "S18", "utterance": "レクサスLXを開いて。", "tool": { "path": "/models/lx/" } },
+  { "id": "S19", "utterance": "ハイブリッド車の選択肢を教えてください。" },
+  { "id": "S20", "utterance": "LCのモデルページを表示して。", "tool": { "path": "/models/lc/" } }
+]

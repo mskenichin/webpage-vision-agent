@@ -1,6 +1,9 @@
 import { browserManager } from "./browser";
 import type { BrowserAction } from "./domain";
-import { requestFoundryAction, requestFoundryResponse } from "./foundry";
+import { runBrowserTask, vehicleModelRequest } from "./browser-task";
+import { runComputerUse } from "./computer-use";
+import { delegateComplexQuery } from "./delegation";
+import { requestFoundryResponse } from "./foundry";
 import { store } from "./store";
 
 function demoAction(prompt: string): BrowserAction | null {
@@ -27,21 +30,35 @@ export async function runAgent(prompt: string) {
   const state = store.snapshot();
   let action: BrowserAction | null = null;
   let usedFoundry = false;
+  const browserIntent = /見せ|開い|表示|探し|検索|ページ|サイト|モデル一覧|車種一覧/i.test(prompt);
+  const explicitModel = vehicleModelRequest(prompt);
 
-  if (state.agentMode === "foundry") {
+  if (browserIntent && explicitModel) {
+    await runBrowserTask(prompt);
+    action = { type: "navigate", url: store.snapshot().currentUrl, actor: "agent" };
+  }
+
+  if (state.agentMode === "foundry" && browserIntent && !action) {
     try {
-      action = await requestFoundryAction(prompt, await browserManager.screenshot(), state.profile);
-      usedFoundry = Boolean(action);
-    } catch {
+      const result = await runComputerUse(prompt);
+      usedFoundry = result.steps > 0;
+      if (result.awaitingApproval) return "操作を続けるには、画面に表示された内容を確認して承認または拒否してください。";
+    } catch (error) {
+      if (error instanceof Error && ["AGENT_STOPPED", "AGENT_TIMEOUT"].includes(error.message)) throw error;
       action = null;
     }
   }
 
-  action ??= demoAction(prompt);
-  if (action) await browserManager.execute(action);
-  else store.setBrowser("ready");
+  if (!usedFoundry && browserIntent && !action) {
+    action = demoAction(prompt);
+    if (action) await browserManager.execute(action);
+  }
+  if (store.snapshot().browserStatus === "agent_running") store.setBrowser("ready");
 
   try {
+    if (/比較|おすすめ|推薦|違い|条件|どちら|メリット|デメリット/i.test(prompt)) {
+      return (await delegateComplexQuery(prompt, state.profile, state.messages, store.snapshot().currentUrl)).text;
+    }
     return await requestFoundryResponse(prompt, state.profile, state.messages, store.snapshot().currentUrl);
   } catch {
     const operation = action

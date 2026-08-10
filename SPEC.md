@@ -131,6 +131,10 @@
 - ユーザーの再発話でAI音声を中断できる。中断後は新しい発話を優先する。
 - マイク権限拒否、音声接続失敗、未対応ブラウザでは、会話履歴を維持したままテキスト入力へフォールバックする。
 - 音声を永続保存しない。MVPで保存するのは確定した文字起こしのみとする。
+- 音声経路はFoundry `gpt-realtime-2.1-mini` とWebRTCで接続し、semantic VAD、ストリーミング文字起こし、音声応答、割り込みを同一セッションで処理する。
+- 比較、推薦、多条件判断は高水準toolを介して `gpt-5.6-sol` へ委譲する。8秒以内に完了しない場合は `gpt-5.4` へフォールバックする。
+- WebRTC接続にはアプリAPIがManaged Identityで取得した短命client secretを使用し、Azureの長期資格情報をブラウザへ渡さない。
+- `gpt-4o-mini-transcribe` と `gpt-4o-mini-tts` の既存APIはRealtime接続を使わないテキスト経路の互換fallbackとして維持する。
 
 ### 5.5 プロファイル画面
 
@@ -267,9 +271,10 @@ flowchart LR
     API --> PROFILE[(プロファイルDB)]
     API --> AUDIT[(セッション・監査ストア)]
     ORCH <-->|画面・操作| BS
-    ORCH <-->|computer-use API| CU[Microsoft Foundry]
-    FE <-->|リアルタイム音声| VOICE[音声ゲートウェイ]
-    VOICE <-->|Realtime API| RT[Microsoft Foundry]
+    ORCH <-->|computer-use API| CU[computer-use-preview]
+    ORCH <-->|複雑な質問| EXPERT[gpt-5.6-sol]
+    API -->|短命client secret| FE
+    FE <-->|WebRTC音声・イベント| RT[gpt-realtime-2.1-mini]
     BS -->|page_viewed / link_clicked| API
     API -->|興味抽出・統合| PROFILE
 ```
@@ -282,10 +287,10 @@ flowchart LR
 | アプリAPI | 認証、セッション、プロファイル、履歴、承認、イベント配信の公開境界。 |
 | エージェントオーケストレーター | モデルコンテキスト構築、操作検証、実行ループ、安全停止。 |
 | 隔離ブラウザサービス | ユーザー別ブラウザ、映像配信、入力転送、画面取得、操作イベント生成。 |
-| 音声ゲートウェイ | 短命な接続資格情報、音声セッション、文字起こしと応答イベントの中継。 |
+| Realtime session API | Managed Identityでセッション限定の短命client secretを発行する。音声データは中継しない。 |
 | プロファイルDB | 明示項目、行動履歴、興味、収集設定の永続化。 |
 | セッション・監査ストア | agent run、承認、操作結果、障害の追跡。 |
-| Microsoft Foundry | computer-useおよびリアルタイム音声モデルのホスティング。 |
+| Microsoft Foundry | Realtime、専門推論、computer-useモデルのホスティング。 |
 
 隔離ブラウザとモデルが扱うbrowser sessionは常に同一でなければならない。映像表示専用の別ブラウザを用意してはならない。
 
@@ -301,6 +306,9 @@ flowchart LR
 | テキスト送信 | `POST /sessions/{id}/messages` | メッセージとagent runを生成する。 |
 | イベント購読 | `GET /sessions/{id}/events` | 回答、操作、状態、エラーをストリームする。 |
 | 音声接続 | `POST /sessions/{id}/voice-token` | 短命かつ当該セッション限定の接続情報を返す。 |
+| 実装済み音声接続 | `POST /api/realtime/session` | Managed IdentityでRealtime用の短命client secretを発行する。 |
+| 実装済み高水準tool | `POST/DELETE /api/realtime/tool` | 専門委譲またはComputer Useを実行し、DELETEで実行中runを停止する。 |
+| 実装済み承認応答 | `POST /api/approval` | 重要操作を当該1回だけ承認または拒否し、承認時はagent runを再開する。 |
 | プロファイル | `GET/PUT/DELETE /profile` | 明示項目を取得・更新・削除する。 |
 | 興味一覧 | `GET /profile/interests` | 興味と根拠要約を取得する。 |
 | 興味更新 | `PATCH/DELETE /profile/interests/{id}` | 名称変更または削除を行う。 |

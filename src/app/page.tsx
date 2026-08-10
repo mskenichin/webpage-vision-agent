@@ -2,7 +2,7 @@
 
 import {
   ArrowLeft, Bot, ChevronRight, History, LoaderCircle, Mic, MicOff, PanelRight,
-  RefreshCw, Send, SlidersHorizontal, Sparkles, Square, Trash2, UserRound,
+  RefreshCw, Send, ShieldAlert, SlidersHorizontal, Sparkles, Square, Trash2, UserRound,
   Volume2, VolumeX, X,
 } from "lucide-react";
 import { FormEvent, useEffect, useRef, useState } from "react";
@@ -36,12 +36,14 @@ export default function Home() {
   const [profileOpen, setProfileOpen] = useState(false);
   const [mobilePane, setMobilePane] = useState<"web" | "chat">("web");
   const [error, setError] = useState("");
-  const recorderRef = useRef<MediaRecorder | null>(null);
   const microphoneRef = useRef<MediaStream | null>(null);
-  const audioContextRef = useRef<AudioContext | null>(null);
-  const vadFrameRef = useRef<number | null>(null);
+  const peerConnectionRef = useRef<RTCPeerConnection | null>(null);
+  const dataChannelRef = useRef<RTCDataChannel | null>(null);
+  const realtimeAudioRef = useRef<HTMLAudioElement | null>(null);
+  const speechAudioRef = useRef<HTMLAudioElement | null>(null);
+  const speechAbortRef = useRef<AbortController | null>(null);
+  const speechUrlRef = useRef<string | null>(null);
   const voiceModeRef = useRef(false);
-  const audioChunksRef = useRef<Blob[]>([]);
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
@@ -54,13 +56,12 @@ export default function Home() {
     return () => {
       active = false;
       window.clearInterval(timer);
-      const recorder = recorderRef.current;
-      if (recorder && recorder.state !== "inactive") {
-        recorder.onstop = null;
-        recorder.stop();
-      }
-      if (vadFrameRef.current !== null) window.cancelAnimationFrame(vadFrameRef.current);
-      void audioContextRef.current?.close();
+      dataChannelRef.current?.close();
+      peerConnectionRef.current?.close();
+      realtimeAudioRef.current?.pause();
+      speechAbortRef.current?.abort();
+      speechAudioRef.current?.pause();
+      if (speechUrlRef.current) URL.revokeObjectURL(speechUrlRef.current);
       microphoneRef.current?.getTracks().forEach((track) => track.stop());
     };
   }, []);
@@ -71,6 +72,44 @@ export default function Home() {
 
   async function refreshState() {
     setState(await jsonRequest<AppState>("/api/session"));
+  }
+
+  function stopSpeech() {
+    speechAbortRef.current?.abort();
+    speechAbortRef.current = null;
+    const audio = speechAudioRef.current;
+    if (audio) {
+      audio.pause();
+      audio.removeAttribute("src");
+      audio.load();
+    }
+    speechAudioRef.current = null;
+    if (speechUrlRef.current) URL.revokeObjectURL(speechUrlRef.current);
+    speechUrlRef.current = null;
+  }
+
+  async function playSpeech(text: string) {
+    stopSpeech();
+    const controller = new AbortController();
+    speechAbortRef.current = controller;
+    const response = await fetch("/api/speech", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text }),
+      signal: controller.signal,
+    });
+    if (!response.ok) throw new Error("音声を生成できませんでした。");
+    const url = URL.createObjectURL(await response.blob());
+    speechUrlRef.current = url;
+    const audio = new Audio(url);
+    speechAudioRef.current = audio;
+    await new Promise<void>((resolve, reject) => {
+      audio.onended = () => resolve();
+      audio.onpause = () => resolve();
+      audio.onerror = () => reject(new Error("音声を再生できませんでした。"));
+      void audio.play().catch(reject);
+    });
+    stopSpeech();
   }
 
   async function browserAction(action: Omit<BrowserAction, "actor">) {
@@ -117,16 +156,11 @@ export default function Home() {
       setState(next);
       setFrame((current) => current + 1);
       const latest = [...next.messages].reverse().find((item) => item.role === "assistant");
-      if (latest && !voiceMuted && "speechSynthesis" in window) {
-        window.speechSynthesis.cancel();
-        const utterance = new SpeechSynthesisUtterance(latest.content);
-        utterance.lang = "ja-JP";
-        const spoken = new Promise<void>((resolve) => {
-          utterance.onend = () => resolve();
-          utterance.onerror = () => resolve();
+      if (latest && !voiceMuted) {
+        await playSpeech(latest.content).catch((cause) => {
+          if (cause instanceof DOMException && cause.name === "AbortError") return;
+          setError(cause instanceof Error ? cause.message : "音声を再生できませんでした。");
         });
-        window.speechSynthesis.speak(utterance);
-        await spoken;
       }
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "メッセージを送信できませんでした。");
@@ -139,139 +173,170 @@ export default function Home() {
   function stopVoiceMode() {
     voiceModeRef.current = false;
     setVoiceMode(false);
-    window.speechSynthesis?.cancel();
-    const recorder = recorderRef.current;
-    if (recorder?.state === "recording") recorder.stop();
+    setRecording(false);
+    setSending(false);
+    setTranscribing(false);
+    setInterimText("");
+    stopSpeech();
+    dataChannelRef.current?.close();
+    dataChannelRef.current = null;
+    peerConnectionRef.current?.close();
+    peerConnectionRef.current = null;
+    realtimeAudioRef.current?.pause();
+    realtimeAudioRef.current = null;
+    microphoneRef.current?.getTracks().forEach((track) => track.stop());
+    microphoneRef.current = null;
   }
 
-  async function startVoiceTurn() {
-    if (!voiceModeRef.current) return;
-    if (!navigator.mediaDevices?.getUserMedia || !("MediaRecorder" in window)) {
+  async function persistRealtimeMessage(role: "user" | "assistant", content: string) {
+    const result = await jsonRequest<{
+      state: AppState;
+      browserTask: { ok: boolean; currentUrl: string; message: string } | null;
+    }>("/api/realtime/message", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ role, content }),
+    });
+    setState(result.state);
+    if (result.browserTask) setFrame((value) => value + 1);
+    return result.browserTask;
+  }
+
+  async function completeRealtimeUserTurn(transcript: string) {
+    try {
+      const browserTask = await persistRealtimeMessage("user", transcript);
+      const instructions = browserTask
+        ? `サーバーでブラウザ操作が完了しました。現在URLは ${browserTask.currentUrl} です。toolを再度呼び出さず、${browserTask.message}と簡潔に日本語で伝えてください。読み込み中とは言わないでください。`
+        : undefined;
+      dataChannelRef.current?.send(JSON.stringify({
+        type: "response.create",
+        ...(instructions ? { response: { instructions } } : {}),
+      }));
+    } catch (cause) {
+      setSending(false);
+      setError(cause instanceof Error ? cause.message : "音声の要求を処理できませんでした。");
+    }
+  }
+
+  async function handleRealtimeTool(event: { name?: string; call_id?: string; arguments?: string }) {
+    if (!event.name || !event.call_id) return;
+    setSending(true);
+    try {
+      const args = JSON.parse(event.arguments ?? "{}") as object;
+      const result = await jsonRequest<object>("/api/realtime/tool", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: event.name, arguments: args }),
+      });
+      dataChannelRef.current?.send(JSON.stringify({
+        type: "conversation.item.create",
+        item: { type: "function_call_output", call_id: event.call_id, output: JSON.stringify(result) },
+      }));
+      dataChannelRef.current?.send(JSON.stringify({ type: "response.create" }));
+      if (event.name === "request_browser_task") {
+        setFrame((value) => value + 1);
+        await refreshState();
+      }
+    } catch (cause) {
+      const output = { ok: false, message: cause instanceof Error ? cause.message : "処理を完了できませんでした。" };
+      dataChannelRef.current?.send(JSON.stringify({
+        type: "conversation.item.create",
+        item: { type: "function_call_output", call_id: event.call_id, output: JSON.stringify(output) },
+      }));
+      dataChannelRef.current?.send(JSON.stringify({ type: "response.create" }));
+    }
+  }
+
+  function handleRealtimeEvent(raw: string) {
+    let event: {
+      type?: string; transcript?: string; delta?: string; name?: string; call_id?: string; arguments?: string;
+      error?: { message?: string };
+    };
+    try {
+      event = JSON.parse(raw) as typeof event;
+    } catch {
+      return;
+    }
+    switch (event.type) {
+      case "input_audio_buffer.speech_started":
+        setRecording(true);
+        setSending(false);
+        setInterimText("お話しください…");
+        break;
+      case "input_audio_buffer.speech_stopped":
+        setRecording(false);
+        setSending(true);
+        setInterimText("認識しています…");
+        break;
+      case "conversation.item.input_audio_transcription.delta":
+        if (event.delta) setInterimText(event.delta);
+        break;
+      case "conversation.item.input_audio_transcription.completed":
+        if (event.transcript?.trim()) {
+          setInterimText(event.transcript.trim());
+          void completeRealtimeUserTurn(event.transcript.trim());
+        }
+        break;
+      case "response.output_audio_transcript.delta":
+        if (event.delta) setInterimText(event.delta);
+        break;
+      case "response.output_audio_transcript.done":
+        if (event.transcript?.trim()) {
+          setInterimText("");
+          void persistRealtimeMessage("assistant", event.transcript.trim()).catch(() => undefined);
+        }
+        break;
+      case "response.function_call_arguments.done":
+        void handleRealtimeTool(event);
+        break;
+      case "response.done":
+        setSending(false);
+        break;
+      case "error":
+        setSending(false);
+        setError(event.error?.message ?? "音声セッションでエラーが発生しました。");
+        break;
+    }
+  }
+
+  async function startVoiceMode() {
+    if (!navigator.mediaDevices?.getUserMedia || !("RTCPeerConnection" in window)) {
       stopVoiceMode();
       setError("このブラウザは音声入力に対応していません。テキスト入力をご利用ください。");
       return;
     }
     setError("");
+    setTranscribing(true);
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      const mimeType = ["audio/webm;codecs=opus", "audio/webm", "audio/mp4"]
-        .find((type) => MediaRecorder.isTypeSupported(type));
-      const recorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
-      let transcriptionInFlight = false;
-      let transcriptionPending = false;
-      let finalTranscriptionPending = false;
-      let stopped = false;
-      let speechDetected = false;
-      let lastVoiceAt = performance.now();
-      let latestTranscript = "";
-      let turnCompleted = false;
       microphoneRef.current = stream;
-      recorderRef.current = recorder;
-      audioChunksRef.current = [];
-
-      const audioContext = new AudioContext();
-      const analyser = audioContext.createAnalyser();
-      analyser.fftSize = 2048;
-      audioContext.createMediaStreamSource(stream).connect(analyser);
-      audioContextRef.current = audioContext;
-      const levels = new Uint8Array(analyser.fftSize);
-
-      function monitorSilence() {
-        if (recorder.state !== "recording") return;
-        analyser.getByteTimeDomainData(levels);
-        let sum = 0;
-        for (const level of levels) {
-          const normalized = (level - 128) / 128;
-          sum += normalized * normalized;
-        }
-        const volume = Math.sqrt(sum / levels.length);
-        const now = performance.now();
-        if (volume > 0.025) {
-          speechDetected = true;
-          lastVoiceAt = now;
-        }
-        if (speechDetected && now - lastVoiceAt >= 1400) {
-          recorder.stop();
-          return;
-        }
-        vadFrameRef.current = window.requestAnimationFrame(monitorSilence);
-      }
-
-      async function completeTurn() {
-        if (turnCompleted) return;
-        turnCompleted = true;
-        setInterimText("");
-        setTranscribing(false);
-        audioChunksRef.current = [];
-        const confirmed = latestTranscript.trim();
-        if (confirmed) await submitMessage(confirmed);
-        if (voiceModeRef.current) await startVoiceTurn();
-      }
-
-      async function transcribeLatest(final: boolean) {
-        if (transcriptionInFlight) {
-          transcriptionPending = true;
-          finalTranscriptionPending ||= final;
-          return;
-        }
-        if (audioChunksRef.current.length === 0) return;
-        transcriptionInFlight = true;
-        setTranscribing(true);
-        const audio = new Blob(audioChunksRef.current, { type: recorder.mimeType });
-        try {
-          const form = new FormData();
-          form.append("audio", audio, `recording.${recorder.mimeType.includes("mp4") ? "m4a" : "webm"}`);
-          form.append("partial", String(!final));
-          const result = await jsonRequest<{ text: string }>("/api/transcribe", { method: "POST", body: form });
-          if (result.text) {
-            latestTranscript = result.text;
-            setMessage(result.text);
-            setInterimText(result.text);
-          }
-        } catch (cause) {
-          setError(cause instanceof Error ? cause.message : "文字起こしを完了できませんでした。");
-        } finally {
-          transcriptionInFlight = false;
-          if (transcriptionPending) {
-            const runFinal = finalTranscriptionPending;
-            transcriptionPending = false;
-            finalTranscriptionPending = false;
-            void transcribeLatest(runFinal);
-          } else if (stopped) {
-            await completeTurn();
-          } else {
-            setTranscribing(false);
-          }
-        }
-      }
-
-      recorder.ondataavailable = (event) => {
-        if (event.data.size === 0) return;
-        audioChunksRef.current.push(event.data);
-        if (!stopped && speechDetected) void transcribeLatest(false);
-      };
-      recorder.onerror = () => {
-        stopVoiceMode();
-        setError("音声を録音できませんでした。テキスト入力は引き続き利用できます。");
-      };
-      recorder.onstop = () => {
-        stopped = true;
-        setRecording(false);
-        if (vadFrameRef.current !== null) window.cancelAnimationFrame(vadFrameRef.current);
-        vadFrameRef.current = null;
-        void audioContext.close();
-        audioContextRef.current = null;
-        stream.getTracks().forEach((track) => track.stop());
-        microphoneRef.current = null;
-        if (speechDetected) void transcribeLatest(true);
-        else void completeTurn();
-      };
-      recorder.start(1800);
+      const session = await jsonRequest<{ clientSecret: string; callsUrl: string }>("/api/realtime/session", { method: "POST" });
+      const peer = new RTCPeerConnection();
+      peerConnectionRef.current = peer;
+      stream.getTracks().forEach((track) => peer.addTrack(track, stream));
+      const audio = new Audio();
+      audio.autoplay = true;
+      audio.muted = voiceMuted;
+      peer.ontrack = (event) => { audio.srcObject = event.streams[0]; };
+      realtimeAudioRef.current = audio;
+      const channel = peer.createDataChannel("oai-events");
+      dataChannelRef.current = channel;
+      channel.onmessage = (event) => handleRealtimeEvent(String(event.data));
+      channel.onclose = () => { if (voiceModeRef.current) stopVoiceMode(); };
+      const offer = await peer.createOffer();
+      await peer.setLocalDescription(offer);
+      const answer = await fetch(session.callsUrl, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${session.clientSecret}`, "Content-Type": "application/sdp" },
+        body: offer.sdp,
+      });
+      if (!answer.ok) throw new Error(`Realtime connection failed: ${answer.status}`);
+      await peer.setRemoteDescription({ type: "answer", sdp: await answer.text() });
+      setTranscribing(false);
       setRecording(true);
-      vadFrameRef.current = window.requestAnimationFrame(monitorSilence);
-    } catch {
+    } catch (cause) {
       stopVoiceMode();
-      setError("マイクを利用できません。ブラウザのマイク権限を確認してください。");
+      setError(cause instanceof Error ? cause.message : "マイクを利用できません。ブラウザのマイク権限を確認してください。");
     }
   }
 
@@ -282,7 +347,48 @@ export default function Home() {
     }
     voiceModeRef.current = true;
     setVoiceMode(true);
-    await startVoiceTurn();
+    await startVoiceMode();
+  }
+
+  async function stopAgent() {
+    dataChannelRef.current?.send(JSON.stringify({ type: "response.cancel" }));
+    setSending(false);
+    setBrowserBusy(false);
+    try {
+      setState(await jsonRequest<AppState>("/api/realtime/tool", { method: "DELETE" }));
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "処理を停止できませんでした。");
+    }
+  }
+
+  async function decideApproval(decision: "approve" | "reject") {
+    const approval = state?.approval;
+    if (!approval) return;
+    setSending(true);
+    setBrowserBusy(decision === "approve");
+    setError("");
+    try {
+      const response = await jsonRequest<{ state: AppState }>("/api/approval", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id: approval.id, decision }),
+      });
+      setState(response.state);
+      setFrame((value) => value + 1);
+      if (dataChannelRef.current?.readyState === "open") {
+        dataChannelRef.current.send(JSON.stringify({
+          type: "conversation.item.create",
+          item: { type: "message", role: "user", content: [{ type: "input_text", text: decision === "approve" ? "画面で操作を承認しました。結果を説明してください。" : "画面で操作を拒否しました。別の方法を提案してください。" }] },
+        }));
+        dataChannelRef.current.send(JSON.stringify({ type: "response.create" }));
+      }
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "承認を処理できませんでした。");
+      await refreshState().catch(() => undefined);
+    } finally {
+      setSending(false);
+      setBrowserBusy(false);
+    }
   }
 
   async function updateProfile(update: Partial<Profile>) {
@@ -343,7 +449,7 @@ export default function Home() {
         <aside className={`chat-pane ${mobilePane === "chat" ? "mobile-active" : ""}`} aria-label="AIアシスタント">
           <div className="chat-heading">
             <div><span className="eyebrow">AI CONCIERGE</span><h2>ご希望を伺います</h2></div>
-            <button className="icon-button compact" title={voiceMuted ? "読み上げを有効化" : "読み上げをミュート"} onClick={() => { window.speechSynthesis?.cancel(); setVoiceMuted((value) => !value); }}>{voiceMuted ? <VolumeX size={17} /> : <Volume2 size={17} />}</button>
+            <button className="icon-button compact" title={voiceMuted ? "読み上げを有効化" : "読み上げをミュート"} onClick={() => { stopSpeech(); setVoiceMuted((value) => { const next = !value; if (realtimeAudioRef.current) realtimeAudioRef.current.muted = next; return next; }); }}>{voiceMuted ? <VolumeX size={17} /> : <Volume2 size={17} />}</button>
           </div>
 
           {state && state.interests.length > 0 && <button className="interest-summary" onClick={() => setProfileOpen(true)}><Sparkles size={15} /><span>{state.interests.slice(0, 3).map((interest) => interest.name).join(" · ")}</span><ChevronRight size={15} /></button>}
@@ -361,13 +467,19 @@ export default function Home() {
 
           {error && <div className="error-banner" role="alert">{error}<button title="閉じる" onClick={() => setError("")}><X size={14} /></button></div>}
 
+          {state?.approval && <section className="approval-banner" aria-label="重要操作の承認">
+            <div className="approval-heading"><ShieldAlert size={18} /><strong>操作の確認が必要です</strong></div>
+            <dl><div><dt>操作</dt><dd>{state.approval.operation}</dd></div><div><dt>対象</dt><dd>{state.approval.targetUrl}</dd></div><div><dt>影響</dt><dd>{state.approval.impact}</dd></div></dl>
+            <div className="approval-actions"><button type="button" onClick={() => void decideApproval("reject")} disabled={sending}>拒否</button><button type="button" className="approve-button" onClick={() => void decideApproval("approve")} disabled={sending}>この1回だけ承認</button></div>
+          </section>}
+
           <form className="composer" onSubmit={(event: FormEvent) => { event.preventDefault(); void submitMessage(); }}>
-            {(interimText || voiceMode) && <div className="transcript"><span className="recording-dot" />{interimText || (recording ? "お話しください。無音になると送信します" : sending ? "応答を生成しています…" : "次の発話を準備しています…")}</div>}
+            {(interimText || voiceMode) && <div className="transcript"><span className="recording-dot" />{interimText || (transcribing ? "音声セッションに接続しています…" : recording ? "お話しください" : sending ? "応答を生成しています…" : "次の発話を待っています…")}</div>}
             <textarea value={message} onChange={(event) => setMessage(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); void submitMessage(); } }} placeholder="例: 家族で使いやすいSUVを見せて" rows={3} disabled={sending} />
             <div className="composer-actions">
               <button type="button" className={`voice-button ${voiceMode ? "recording" : ""}`} onClick={() => void toggleRecording()} title={voiceMode ? "音声入力モードを停止" : "音声入力モードを開始"}>{voiceMode ? <MicOff size={19} /> : transcribing ? <LoaderCircle size={18} className="spin" /> : <Mic size={19} />}</button>
-              <span>{voiceMode ? recording ? "発話を待っています" : "応答中。音声モードは継続" : "テキストまたは音声"}</span>
-              <button type="submit" className="send-button" disabled={!message.trim() || sending} title="送信">{sending ? <Square size={16} fill="currentColor" /> : <Send size={17} />}</button>
+              <span>{voiceMode ? transcribing ? "接続中" : recording ? "リアルタイム音声" : "応答中。音声モードは継続" : "テキストまたは音声"}</span>
+              <button type={sending ? "button" : "submit"} className="send-button" disabled={!sending && !message.trim()} title={sending ? "生成と操作を停止" : "送信"} onClick={sending ? () => void stopAgent() : undefined}>{sending ? <Square size={16} fill="currentColor" /> : <Send size={17} />}</button>
             </div>
           </form>
         </aside>

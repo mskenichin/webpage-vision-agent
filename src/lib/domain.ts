@@ -51,6 +51,14 @@ export interface ChatMessage {
   createdAt: string;
 }
 
+export interface ApprovalRequest {
+  id: string;
+  operation: string;
+  targetUrl: string;
+  impact: string;
+  expiresAt: string;
+}
+
 export interface AppState {
   sessionId: string;
   browserStatus: BrowserStatus;
@@ -59,6 +67,7 @@ export interface AppState {
   interests: Interest[];
   activity: ActivityEvent[];
   messages: ChatMessage[];
+  approval: ApprovalRequest | null;
   agentMode: "foundry" | "demo";
 }
 
