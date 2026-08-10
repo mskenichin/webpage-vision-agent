@@ -8,6 +8,7 @@ Lexus公式サイトを左ペインの隔離ブラウザで表示し、右ペイ
 - LexusサイトのJPEGライブ表示、クリック、スクロール、戻る、再読み込み
 - テキストチャットとモデルページへのデモナビゲーション
 - MediaRecorderとFoundry `gpt-4o-mini-transcribe` による日本語音声入力・文字起こし
+- 約1.4秒の無音による発話確定、`gpt-5.4` 応答、次の発話待機を繰り返す音声会話モード
 - ブラウザの音声合成による日本語読み上げ
 - Microsoft Foundry Responses APIアダプターとDefaultAzureCredential認証
 - 手動・AI操作共通の閲覧・リンククリック履歴
@@ -44,12 +45,13 @@ npm run dev
 AZURE_FOUNDRY_ENDPOINT=https://<foundry-resource-endpoint>
 AZURE_FOUNDRY_MODEL=<computer-use-deployment-name>
 AZURE_FOUNDRY_PROJECT_ENDPOINT=https://<resource>.services.ai.azure.com/api/projects/<project>
+AZURE_CHAT_MODEL=gpt-5.4
 AZURE_TRANSCRIPTION_MODEL=gpt-4o-mini-transcribe
 ```
 
 APIキーは使用せず、`@azure/identity` の `DefaultAzureCredential` で `https://cognitiveservices.azure.com/.default` のトークンを取得します。ローカルではAzure CLI等でログインし、Azure上では最小権限のマネージドIDを割り当ててください。パスワード、トークン、APIキーは環境ファイルへ記載しないでください。
 
-音声入力ではブラウザが録音したWebMまたはMP4音声を約1.8秒間隔で `/api/transcribe` へ送信します。サーバーは最大25 MBと音声形式を検証し、マネージドIDでFoundryの文字起こしdeploymentを呼び出します。録音中は文字起こし結果が入力欄へ逐次反映され、マイクボタンをもう一度押すと録音を停止して最後の音声を確定します。音声ファイルは保存しません。
+音声入力ではブラウザが録音したWebMまたはMP4音声を約1.8秒間隔で `/api/transcribe` へ送信します。サーバーは最大25 MBと音声形式を検証し、マネージドIDでFoundryの文字起こしdeploymentを呼び出します。録音中は文字起こし結果が入力欄へ逐次反映されます。発話開始後に約1.4秒の無音を検知すると文字列を確定し、`gpt-5.4` へ送信して応答を表示・読み上げます。応答後は自動的に次の発話待ちへ戻り、マイクボタンをもう一度押すまで音声会話モードを継続します。音声ファイルは保存しません。
 
 ## コマンド
 
@@ -76,6 +78,7 @@ npm test       # Vitest
 | --- | --- | --- |
 | Azure AI Services | `aif-webpage-vision-agent-dev-6a372b32` | East US 2 |
 | Foundry Project | `aif-webpage-vision-agent-project` | East US 2 |
+| Chat deployment | `gpt-5.4` (`2026-03-05`) | East US 2 |
 | Transcription deployment | `gpt-4o-mini-transcribe` (`2025-12-15`, GlobalStandard 60) | East US 2 |
 | User Assigned Managed Identity | `id-webpage-vision-agent-dev` | Japan East |
 | Azure Container Registry | `crwebpagevisiondev6a372b32` | Japan East |

@@ -1,6 +1,6 @@
 import { browserManager } from "./browser";
 import type { BrowserAction } from "./domain";
-import { requestFoundryAction } from "./foundry";
+import { requestFoundryAction, requestFoundryResponse } from "./foundry";
 import { store } from "./store";
 
 function demoAction(prompt: string): BrowserAction | null {
@@ -41,9 +41,13 @@ export async function runAgent(prompt: string) {
   if (action) await browserManager.execute(action);
   else store.setBrowser("ready");
 
-  const operation = action
-    ? "左のブラウザを更新しました。"
-    : "具体的なモデル名や「SUVを見たい」のような条件を教えてください。";
-  const mode = usedFoundry ? "Microsoft Foundryで" : "デモナビゲーションで";
-  return `${mode}${operation} ${profileContext()}`;
+  try {
+    return await requestFoundryResponse(prompt, state.profile, state.messages, store.snapshot().currentUrl);
+  } catch {
+    const operation = action
+      ? "左のブラウザを更新しました。"
+      : "具体的なモデル名や「SUVを見たい」のような条件を教えてください。";
+    const mode = usedFoundry ? "Microsoft Foundryで" : "デモナビゲーションで";
+    return `${mode}${operation} ${profileContext()}`;
+  }
 }

@@ -31,12 +31,16 @@ export default function Home() {
   const [browserBusy, setBrowserBusy] = useState(true);
   const [recording, setRecording] = useState(false);
   const [transcribing, setTranscribing] = useState(false);
+  const [voiceMode, setVoiceMode] = useState(false);
   const [voiceMuted, setVoiceMuted] = useState(false);
   const [profileOpen, setProfileOpen] = useState(false);
   const [mobilePane, setMobilePane] = useState<"web" | "chat">("web");
   const [error, setError] = useState("");
   const recorderRef = useRef<MediaRecorder | null>(null);
   const microphoneRef = useRef<MediaStream | null>(null);
+  const audioContextRef = useRef<AudioContext | null>(null);
+  const vadFrameRef = useRef<number | null>(null);
+  const voiceModeRef = useRef(false);
   const audioChunksRef = useRef<Blob[]>([]);
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
 
@@ -55,6 +59,8 @@ export default function Home() {
         recorder.onstop = null;
         recorder.stop();
       }
+      if (vadFrameRef.current !== null) window.cancelAnimationFrame(vadFrameRef.current);
+      void audioContextRef.current?.close();
       microphoneRef.current?.getTracks().forEach((track) => track.stop());
     };
   }, []);
@@ -115,7 +121,12 @@ export default function Home() {
         window.speechSynthesis.cancel();
         const utterance = new SpeechSynthesisUtterance(latest.content);
         utterance.lang = "ja-JP";
+        const spoken = new Promise<void>((resolve) => {
+          utterance.onend = () => resolve();
+          utterance.onerror = () => resolve();
+        });
         window.speechSynthesis.speak(utterance);
+        await spoken;
       }
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "メッセージを送信できませんでした。");
@@ -125,12 +136,18 @@ export default function Home() {
     }
   }
 
-  async function toggleRecording() {
-    if (recording) {
-      recorderRef.current?.stop();
-      return;
-    }
+  function stopVoiceMode() {
+    voiceModeRef.current = false;
+    setVoiceMode(false);
+    window.speechSynthesis?.cancel();
+    const recorder = recorderRef.current;
+    if (recorder?.state === "recording") recorder.stop();
+  }
+
+  async function startVoiceTurn() {
+    if (!voiceModeRef.current) return;
     if (!navigator.mediaDevices?.getUserMedia || !("MediaRecorder" in window)) {
+      stopVoiceMode();
       setError("このブラウザは音声入力に対応していません。テキスト入力をご利用ください。");
       return;
     }
@@ -144,9 +161,52 @@ export default function Home() {
       let transcriptionPending = false;
       let finalTranscriptionPending = false;
       let stopped = false;
+      let speechDetected = false;
+      let lastVoiceAt = performance.now();
+      let latestTranscript = "";
+      let turnCompleted = false;
       microphoneRef.current = stream;
       recorderRef.current = recorder;
       audioChunksRef.current = [];
+
+      const audioContext = new AudioContext();
+      const analyser = audioContext.createAnalyser();
+      analyser.fftSize = 2048;
+      audioContext.createMediaStreamSource(stream).connect(analyser);
+      audioContextRef.current = audioContext;
+      const levels = new Uint8Array(analyser.fftSize);
+
+      function monitorSilence() {
+        if (recorder.state !== "recording") return;
+        analyser.getByteTimeDomainData(levels);
+        let sum = 0;
+        for (const level of levels) {
+          const normalized = (level - 128) / 128;
+          sum += normalized * normalized;
+        }
+        const volume = Math.sqrt(sum / levels.length);
+        const now = performance.now();
+        if (volume > 0.025) {
+          speechDetected = true;
+          lastVoiceAt = now;
+        }
+        if (speechDetected && now - lastVoiceAt >= 1400) {
+          recorder.stop();
+          return;
+        }
+        vadFrameRef.current = window.requestAnimationFrame(monitorSilence);
+      }
+
+      async function completeTurn() {
+        if (turnCompleted) return;
+        turnCompleted = true;
+        setInterimText("");
+        setTranscribing(false);
+        audioChunksRef.current = [];
+        const confirmed = latestTranscript.trim();
+        if (confirmed) await submitMessage(confirmed);
+        if (voiceModeRef.current) await startVoiceTurn();
+      }
 
       async function transcribeLatest(final: boolean) {
         if (transcriptionInFlight) {
@@ -164,6 +224,7 @@ export default function Home() {
           form.append("partial", String(!final));
           const result = await jsonRequest<{ text: string }>("/api/transcribe", { method: "POST", body: form });
           if (result.text) {
+            latestTranscript = result.text;
             setMessage(result.text);
             setInterimText(result.text);
           }
@@ -177,9 +238,7 @@ export default function Home() {
             finalTranscriptionPending = false;
             void transcribeLatest(runFinal);
           } else if (stopped) {
-            setInterimText("");
-            setTranscribing(false);
-            audioChunksRef.current = [];
+            await completeTurn();
           } else {
             setTranscribing(false);
           }
@@ -189,21 +248,41 @@ export default function Home() {
       recorder.ondataavailable = (event) => {
         if (event.data.size === 0) return;
         audioChunksRef.current.push(event.data);
-        if (!stopped) void transcribeLatest(false);
+        if (!stopped && speechDetected) void transcribeLatest(false);
       };
-      recorder.onerror = () => setError("音声を録音できませんでした。テキスト入力は引き続き利用できます。");
+      recorder.onerror = () => {
+        stopVoiceMode();
+        setError("音声を録音できませんでした。テキスト入力は引き続き利用できます。");
+      };
       recorder.onstop = () => {
         stopped = true;
         setRecording(false);
+        if (vadFrameRef.current !== null) window.cancelAnimationFrame(vadFrameRef.current);
+        vadFrameRef.current = null;
+        void audioContext.close();
+        audioContextRef.current = null;
         stream.getTracks().forEach((track) => track.stop());
         microphoneRef.current = null;
-        void transcribeLatest(true);
+        if (speechDetected) void transcribeLatest(true);
+        else void completeTurn();
       };
       recorder.start(1800);
       setRecording(true);
+      vadFrameRef.current = window.requestAnimationFrame(monitorSilence);
     } catch {
+      stopVoiceMode();
       setError("マイクを利用できません。ブラウザのマイク権限を確認してください。");
     }
+  }
+
+  async function toggleRecording() {
+    if (voiceModeRef.current) {
+      stopVoiceMode();
+      return;
+    }
+    voiceModeRef.current = true;
+    setVoiceMode(true);
+    await startVoiceTurn();
   }
 
   async function updateProfile(update: Partial<Profile>) {
@@ -283,11 +362,11 @@ export default function Home() {
           {error && <div className="error-banner" role="alert">{error}<button title="閉じる" onClick={() => setError("")}><X size={14} /></button></div>}
 
           <form className="composer" onSubmit={(event: FormEvent) => { event.preventDefault(); void submitMessage(); }}>
-            {(interimText || recording || transcribing) && <div className="transcript"><span className="recording-dot" />{interimText || (recording ? "音声を認識しています…" : "最後の音声を確定しています…")}</div>}
+            {(interimText || voiceMode) && <div className="transcript"><span className="recording-dot" />{interimText || (recording ? "お話しください。無音になると送信します" : sending ? "応答を生成しています…" : "次の発話を準備しています…")}</div>}
             <textarea value={message} onChange={(event) => setMessage(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); void submitMessage(); } }} placeholder="例: 家族で使いやすいSUVを見せて" rows={3} disabled={sending} />
             <div className="composer-actions">
-              <button type="button" className={`voice-button ${recording ? "recording" : ""}`} onClick={() => void toggleRecording()} disabled={transcribing && !recording} title={recording ? "文字起こしを停止" : "音声で入力"}>{recording ? <MicOff size={19} /> : transcribing ? <LoaderCircle size={18} className="spin" /> : <Mic size={19} />}</button>
-              <span>{recording ? "リアルタイム文字起こし中" : transcribing ? "最後の音声を確定中" : "テキストまたは音声"}</span>
+              <button type="button" className={`voice-button ${voiceMode ? "recording" : ""}`} onClick={() => void toggleRecording()} title={voiceMode ? "音声入力モードを停止" : "音声入力モードを開始"}>{voiceMode ? <MicOff size={19} /> : transcribing ? <LoaderCircle size={18} className="spin" /> : <Mic size={19} />}</button>
+              <span>{voiceMode ? recording ? "発話を待っています" : "応答中。音声モードは継続" : "テキストまたは音声"}</span>
               <button type="submit" className="send-button" disabled={!message.trim() || sending} title="送信">{sending ? <Square size={16} fill="currentColor" /> : <Send size={17} />}</button>
             </div>
           </form>

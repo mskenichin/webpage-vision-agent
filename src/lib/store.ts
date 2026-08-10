@@ -29,7 +29,7 @@ function createState(): AppState {
         createdAt: new Date().toISOString(),
       },
     ],
-    agentMode: process.env.AZURE_FOUNDRY_ENDPOINT && process.env.AZURE_FOUNDRY_MODEL ? "foundry" : "demo",
+    agentMode: process.env.AZURE_FOUNDRY_ENDPOINT && (process.env.AZURE_CHAT_MODEL || process.env.AZURE_FOUNDRY_MODEL) ? "foundry" : "demo",
   };
 }
 
