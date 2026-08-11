@@ -96,6 +96,10 @@ export class DemoStore {
     return message;
   }
 
+  clearMessages() {
+    this.state.messages = [];
+  }
+
   addActivity(event: Omit<ActivityEvent, "id" | "occurredAt">) {
     if (!this.state.profile.activityCollection) return null;
     const eventKey = `${event.sessionId}:${event.operationId}:${event.type}`;
@@ -138,7 +142,9 @@ declare global {
 }
 
 const compatibleStore = globalThis.webpageVisionStore;
-export const store = compatibleStore && typeof compatibleStore.clearApproval === "function"
+export const store = compatibleStore
+  && typeof compatibleStore.clearApproval === "function"
+  && typeof compatibleStore.clearMessages === "function"
   ? compatibleStore
   : new DemoStore();
 if (process.env.NODE_ENV !== "production") globalThis.webpageVisionStore = store;

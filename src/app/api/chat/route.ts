@@ -28,3 +28,8 @@ export async function POST(request: Request) {
     return NextResponse.json(store.snapshot(), { status: 502 });
   }
 }
+
+export async function DELETE() {
+  store.clearMessages();
+  return NextResponse.json(store.snapshot());
+}

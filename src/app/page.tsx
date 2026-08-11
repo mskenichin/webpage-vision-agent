@@ -170,6 +170,16 @@ export default function Home() {
     }
   }
 
+  async function clearChat() {
+    setError("");
+    stopSpeech();
+    try {
+      setState(await jsonRequest<AppState>("/api/chat", { method: "DELETE" }));
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "チャットをクリアできませんでした。");
+    }
+  }
+
   function stopVoiceMode() {
     voiceModeRef.current = false;
     setVoiceMode(false);
@@ -203,8 +213,18 @@ export default function Home() {
   }
 
   async function completeRealtimeUserTurn(transcript: string) {
+    setState((current) => current ? {
+      ...current,
+      messages: [...current.messages, {
+        id: crypto.randomUUID(),
+        role: "user",
+        content: transcript,
+        createdAt: new Date().toISOString(),
+      }],
+    } : current);
     try {
       const browserTask = await persistRealtimeMessage("user", transcript);
+      setSending(true);
       const instructions = browserTask
         ? `サーバーでブラウザ操作が完了しました。現在URLは ${browserTask.currentUrl} です。toolを再度呼び出さず、${browserTask.message}と簡潔に日本語で伝えてください。読み込み中とは言わないでください。`
         : undefined;
@@ -265,7 +285,7 @@ export default function Home() {
         break;
       case "input_audio_buffer.speech_stopped":
         setRecording(false);
-        setSending(true);
+        setSending(false);
         setInterimText("認識しています…");
         break;
       case "conversation.item.input_audio_transcription.delta":
@@ -449,12 +469,16 @@ export default function Home() {
         <aside className={`chat-pane ${mobilePane === "chat" ? "mobile-active" : ""}`} aria-label="AIアシスタント">
           <div className="chat-heading">
             <div><span className="eyebrow">AI CONCIERGE</span><h2>ご希望を伺います</h2></div>
-            <button className="icon-button compact" title={voiceMuted ? "読み上げを有効化" : "読み上げをミュート"} onClick={() => { stopSpeech(); setVoiceMuted((value) => { const next = !value; if (realtimeAudioRef.current) realtimeAudioRef.current.muted = next; return next; }); }}>{voiceMuted ? <VolumeX size={17} /> : <Volume2 size={17} />}</button>
+            <div className="chat-heading-actions">
+              <button className="icon-button compact" title="チャットをクリア" aria-label="チャットをクリア" disabled={sending || !state?.messages.length} onClick={() => void clearChat()}><Trash2 size={17} /></button>
+              <button className="icon-button compact" title={voiceMuted ? "読み上げを有効化" : "読み上げをミュート"} onClick={() => { stopSpeech(); setVoiceMuted((value) => { const next = !value; if (realtimeAudioRef.current) realtimeAudioRef.current.muted = next; return next; }); }}>{voiceMuted ? <VolumeX size={17} /> : <Volume2 size={17} />}</button>
+            </div>
           </div>
 
           {state && state.interests.length > 0 && <button className="interest-summary" onClick={() => setProfileOpen(true)}><Sparkles size={15} /><span>{state.interests.slice(0, 3).map((interest) => interest.name).join(" · ")}</span><ChevronRight size={15} /></button>}
 
           <div className="messages" aria-live="polite">
+            {state?.messages.length === 0 && <p className="chat-empty">新しいメッセージを入力して会話を始められます。</p>}
             {state?.messages.map((item) => (
               <article className={`message message-${item.role}`} key={item.id}>
                 <div className="message-avatar">{item.role === "assistant" ? <Bot size={16} /> : item.role === "user" ? <UserRound size={16} /> : <Sparkles size={16} />}</div>

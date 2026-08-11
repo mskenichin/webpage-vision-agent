@@ -52,3 +52,15 @@ describe("DemoStore approvals", () => {
     expect(store.snapshot()).toMatchObject({ browserStatus: "ready", approval: null });
   });
 });
+
+describe("DemoStore messages", () => {
+  it("clears chat messages without resetting the session", () => {
+    const store = new DemoStore();
+    const sessionId = store.snapshot().sessionId;
+    store.addMessage("user", "SUVを見せて");
+
+    store.clearMessages();
+
+    expect(store.snapshot()).toMatchObject({ sessionId, messages: [] });
+  });
+});
