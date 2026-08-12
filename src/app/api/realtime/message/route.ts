@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
-import { runBrowserTask, vehicleModelRequest } from "@/lib/browser-task";
+import { browserManager } from "@/lib/browser";
+import { browserTaskRequest, runBrowserTask } from "@/lib/browser-task";
 import { store } from "@/lib/store";
 
 export const runtime = "nodejs";
@@ -15,12 +16,16 @@ export async function POST(request: Request) {
   if (!parsed.success) return NextResponse.json({ code: "INVALID_MESSAGE" }, { status: 400 });
   store.addMessage(parsed.data.role, parsed.data.content);
   let browserTask: Awaited<ReturnType<typeof runBrowserTask>> | null = null;
-  if (parsed.data.role === "user" && vehicleModelRequest(parsed.data.content)) {
+  if (parsed.data.role === "user" && browserTaskRequest(parsed.data.content, store.snapshot().currentUrl)) {
     try {
       browserTask = await runBrowserTask(parsed.data.content);
     } catch (error) {
       console.error("Deterministic voice browser task failed", error);
     }
   }
-  return NextResponse.json({ state: store.snapshot(), browserTask });
+  if (parsed.data.role === "user" && !browserTask) {
+    await browserManager.revealRelevantContent(parsed.data.content).catch(() => undefined);
+  }
+  const pageContext = await browserManager.pageContext(parsed.data.content, parsed.data.role === "user").catch(() => undefined);
+  return NextResponse.json({ state: store.snapshot(), browserTask, pageContext });
 }

@@ -1,5 +1,13 @@
 import { describe, expect, it } from "vitest";
-import { requiresRiskInspection } from "./browser";
+import { requiresRiskInspection, revealQueryText } from "./browser";
+
+describe("revealQueryText", () => {
+  it("adds English page-heading aliases for Japanese vehicle types", () => {
+    expect(revealQueryText("セダンタイプを見せて")).toContain("sedan");
+    expect(revealQueryText("ミニバンを探して")).toContain("minivan");
+    expect(revealQueryText("電気自動車について教えて")).toContain("BEV");
+  });
+});
 
 describe("requiresRiskInspection", () => {
   it("inspects actions that can enter or submit sensitive data", () => {

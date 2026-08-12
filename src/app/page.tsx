@@ -6,7 +6,8 @@ import {
   Volume2, VolumeX, X,
 } from "lucide-react";
 import { FormEvent, useEffect, useRef, useState } from "react";
-import type { AppState, BrowserAction, Profile } from "@/lib/domain";
+import type { AppState, BrowserAction, PageContext, Profile } from "@/lib/domain";
+import { realtimeInstructions } from "@/lib/realtime-instructions";
 
 const statusLabels: Record<AppState["browserStatus"], string> = {
   starting: "ブラウザを起動中", ready: "接続済み", user_controlled: "手動操作中",
@@ -27,6 +28,7 @@ export default function Home() {
   const [message, setMessage] = useState("");
   const [interimText, setInterimText] = useState("");
   const [frame, setFrame] = useState(0);
+  const [browserFrameUrl, setBrowserFrameUrl] = useState("");
   const [sending, setSending] = useState(false);
   const [browserBusy, setBrowserBusy] = useState(true);
   const [recording, setRecording] = useState(false);
@@ -45,6 +47,15 @@ export default function Home() {
   const speechUrlRef = useRef<string | null>(null);
   const voiceModeRef = useRef(false);
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
+  const browserFrameRevisionRef = useRef<number | null>(null);
+  const pendingFrameRevisionRef = useRef<number | null>(null);
+  const browserFrameUrlRef = useRef("");
+  const realtimeResponseActiveRef = useRef(false);
+  const pendingRealtimeResponsesRef = useRef<Array<{ instructions?: string }>>([]);
+  const stateRef = useRef<AppState | null>(null);
+  const pageContextRef = useRef<PageContext | undefined>(undefined);
+  const inputTranscriptDeltaRef = useRef("");
+  const outputTranscriptDeltaRef = useRef("");
 
   useEffect(() => {
     let active = true;
@@ -52,26 +63,72 @@ export default function Home() {
       .then((data) => { if (active) setState(data); })
       .catch((cause: Error) => { if (active) setError(cause.message); })
       .finally(() => { if (active) setBrowserBusy(false); });
-    const timer = window.setInterval(() => setFrame((value) => value + 1), 1600);
     return () => {
       active = false;
-      window.clearInterval(timer);
       dataChannelRef.current?.close();
       peerConnectionRef.current?.close();
       realtimeAudioRef.current?.pause();
       speechAbortRef.current?.abort();
       speechAudioRef.current?.pause();
       if (speechUrlRef.current) URL.revokeObjectURL(speechUrlRef.current);
+      if (browserFrameUrlRef.current) URL.revokeObjectURL(browserFrameUrlRef.current);
       microphoneRef.current?.getTracks().forEach((track) => track.stop());
     };
+  }, []);
+
+  useEffect(() => {
+    const timer = window.setInterval(() => setFrame((value) => value + 1), 800);
+    return () => window.clearInterval(timer);
+  }, []);
+
+  useEffect(() => {
+    let active = true;
+    const controller = new AbortController();
+    void fetch(`/api/browser?frame=${frame}`, { cache: "no-store", signal: controller.signal })
+      .then(async (response) => {
+        if (!response.ok) throw new Error("ブラウザ画面を同期できませんでした。");
+        const revision = Number(response.headers.get("X-Browser-Frame-Revision"));
+        const url = URL.createObjectURL(await response.blob());
+        if (!active) {
+          URL.revokeObjectURL(url);
+          return;
+        }
+        if (browserFrameUrlRef.current) URL.revokeObjectURL(browserFrameUrlRef.current);
+        browserFrameUrlRef.current = url;
+        pendingFrameRevisionRef.current = Number.isSafeInteger(revision) ? revision : null;
+        setBrowserFrameUrl(url);
+        setBrowserBusy(false);
+      })
+      .catch((cause) => {
+        if (cause instanceof DOMException && cause.name === "AbortError") return;
+        if (!browserFrameUrlRef.current) setError(cause instanceof Error ? cause.message : "ブラウザ画面を同期できませんでした。");
+      });
+    return () => {
+      active = false;
+      controller.abort();
+    };
+  }, [frame]);
+
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      void jsonRequest<AppState>("/api/session").then(setState).catch(() => undefined);
+    }, 800);
+    return () => window.clearInterval(timer);
   }, []);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [state?.messages.length, sending]);
 
+  useEffect(() => {
+    stateRef.current = state;
+  }, [state]);
+
   async function refreshState() {
-    setState(await jsonRequest<AppState>("/api/session"));
+    const next = await jsonRequest<AppState>("/api/session");
+    setState(next);
+    stateRef.current = next;
+    return next;
   }
 
   function stopSpeech() {
@@ -119,7 +176,12 @@ export default function Home() {
       await jsonRequest("/api/browser", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ ...action, actor: "user", operationId: crypto.randomUUID() }),
+        body: JSON.stringify({
+          ...action,
+          actor: "user",
+          operationId: crypto.randomUUID(),
+          expectedFrameRevision: browserFrameRevisionRef.current ?? undefined,
+        }),
       });
       setFrame((value) => value + 1);
       await refreshState();
@@ -131,12 +193,20 @@ export default function Home() {
   }
 
   function handleBrowserClick(event: React.MouseEvent<HTMLImageElement>) {
-    if (browserBusy || state?.browserStatus === "agent_running") return;
+    if (browserBusy) return;
     const rect = event.currentTarget.getBoundingClientRect();
+    const scale = Math.min(rect.width / 1440, rect.height / 900);
+    const contentWidth = 1440 * scale;
+    const contentHeight = 900 * scale;
+    const offsetX = (rect.width - contentWidth) / 2;
+    const offsetY = (rect.height - contentHeight) / 2;
+    const x = event.clientX - rect.left - offsetX;
+    const y = event.clientY - rect.top - offsetY;
+    if (x < 0 || y < 0 || x > contentWidth || y > contentHeight) return;
     void browserAction({
       type: "click",
-      x: ((event.clientX - rect.left) / rect.width) * 1440,
-      y: ((event.clientY - rect.top) / rect.height) * 900,
+      x: x / scale,
+      y: y / scale,
     });
   }
 
@@ -196,20 +266,67 @@ export default function Home() {
     realtimeAudioRef.current = null;
     microphoneRef.current?.getTracks().forEach((track) => track.stop());
     microphoneRef.current = null;
+    realtimeResponseActiveRef.current = false;
+    pendingRealtimeResponsesRef.current = [];
+    inputTranscriptDeltaRef.current = "";
+    outputTranscriptDeltaRef.current = "";
+  }
+
+  function requestRealtimeResponse(instructions?: string) {
+    const channel = dataChannelRef.current;
+    if (!channel || channel.readyState !== "open") return;
+    if (realtimeResponseActiveRef.current) {
+      pendingRealtimeResponsesRef.current.push({ instructions });
+      return;
+    }
+    realtimeResponseActiveRef.current = true;
+    const current = stateRef.current;
+    const responseInstructions = current
+      ? realtimeInstructions(current.profile, current.currentUrl, current.interests, instructions, pageContextRef.current)
+      : instructions;
+    channel.send(JSON.stringify({
+      type: "response.create",
+      ...(responseInstructions ? { response: { instructions: responseInstructions } } : {}),
+    }));
+  }
+
+  function completeRealtimeResponse() {
+    realtimeResponseActiveRef.current = false;
+    const pending = pendingRealtimeResponsesRef.current.shift();
+    if (pending) requestRealtimeResponse(pending.instructions);
   }
 
   async function persistRealtimeMessage(role: "user" | "assistant", content: string) {
     const result = await jsonRequest<{
       state: AppState;
       browserTask: { ok: boolean; currentUrl: string; message: string } | null;
+      pageContext?: PageContext;
     }>("/api/realtime/message", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ role, content }),
     });
     setState(result.state);
-    if (result.browserTask) setFrame((value) => value + 1);
+    stateRef.current = result.state;
+    pageContextRef.current = result.pageContext;
+    if (role === "user") setFrame((value) => value + 1);
     return result.browserTask;
+  }
+
+  async function synchronizeBrowserFrame() {
+    const response = await fetch(`/api/browser?voice=${Date.now()}`, { cache: "no-store" });
+    if (!response.ok) throw new Error("ブラウザ画面を同期できませんでした。");
+    const revision = Number(response.headers.get("X-Browser-Frame-Revision"));
+    const url = URL.createObjectURL(await response.blob());
+    const image = new Image();
+    image.src = url;
+    await image.decode().catch(() => undefined);
+    if (browserFrameUrlRef.current) URL.revokeObjectURL(browserFrameUrlRef.current);
+    browserFrameUrlRef.current = url;
+    const nextRevision = Number.isSafeInteger(revision) ? revision : null;
+    pendingFrameRevisionRef.current = nextRevision;
+    browserFrameRevisionRef.current = nextRevision;
+    setBrowserFrameUrl(url);
   }
 
   async function completeRealtimeUserTurn(transcript: string) {
@@ -224,14 +341,12 @@ export default function Home() {
     } : current);
     try {
       const browserTask = await persistRealtimeMessage("user", transcript);
+      await synchronizeBrowserFrame();
       setSending(true);
       const instructions = browserTask
         ? `サーバーでブラウザ操作が完了しました。現在URLは ${browserTask.currentUrl} です。toolを再度呼び出さず、${browserTask.message}と簡潔に日本語で伝えてください。読み込み中とは言わないでください。`
         : undefined;
-      dataChannelRef.current?.send(JSON.stringify({
-        type: "response.create",
-        ...(instructions ? { response: { instructions } } : {}),
-      }));
+      requestRealtimeResponse(instructions);
     } catch (cause) {
       setSending(false);
       setError(cause instanceof Error ? cause.message : "音声の要求を処理できませんでした。");
@@ -243,7 +358,7 @@ export default function Home() {
     setSending(true);
     try {
       const args = JSON.parse(event.arguments ?? "{}") as object;
-      const result = await jsonRequest<object>("/api/realtime/tool", {
+      const result = await jsonRequest<{ pageContext?: PageContext }>("/api/realtime/tool", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ name: event.name, arguments: args }),
@@ -252,18 +367,19 @@ export default function Home() {
         type: "conversation.item.create",
         item: { type: "function_call_output", call_id: event.call_id, output: JSON.stringify(result) },
       }));
-      dataChannelRef.current?.send(JSON.stringify({ type: "response.create" }));
       if (event.name === "request_browser_task") {
+        pageContextRef.current = result.pageContext;
         setFrame((value) => value + 1);
         await refreshState();
       }
+      requestRealtimeResponse();
     } catch (cause) {
       const output = { ok: false, message: cause instanceof Error ? cause.message : "処理を完了できませんでした。" };
       dataChannelRef.current?.send(JSON.stringify({
         type: "conversation.item.create",
         item: { type: "function_call_output", call_id: event.call_id, output: JSON.stringify(output) },
       }));
-      dataChannelRef.current?.send(JSON.stringify({ type: "response.create" }));
+      requestRealtimeResponse();
     }
   }
 
@@ -279,6 +395,7 @@ export default function Home() {
     }
     switch (event.type) {
       case "input_audio_buffer.speech_started":
+        inputTranscriptDeltaRef.current = "";
         setRecording(true);
         setSending(false);
         setInterimText("お話しください…");
@@ -289,18 +406,26 @@ export default function Home() {
         setInterimText("認識しています…");
         break;
       case "conversation.item.input_audio_transcription.delta":
-        if (event.delta) setInterimText(event.delta);
+        if (event.delta) {
+          inputTranscriptDeltaRef.current += event.delta;
+          setInterimText(inputTranscriptDeltaRef.current);
+        }
         break;
       case "conversation.item.input_audio_transcription.completed":
         if (event.transcript?.trim()) {
+          inputTranscriptDeltaRef.current = "";
           setInterimText(event.transcript.trim());
           void completeRealtimeUserTurn(event.transcript.trim());
         }
         break;
       case "response.output_audio_transcript.delta":
-        if (event.delta) setInterimText(event.delta);
+        if (event.delta) {
+          outputTranscriptDeltaRef.current += event.delta;
+          setInterimText(outputTranscriptDeltaRef.current);
+        }
         break;
       case "response.output_audio_transcript.done":
+        outputTranscriptDeltaRef.current = "";
         if (event.transcript?.trim()) {
           setInterimText("");
           void persistRealtimeMessage("assistant", event.transcript.trim()).catch(() => undefined);
@@ -309,10 +434,16 @@ export default function Home() {
       case "response.function_call_arguments.done":
         void handleRealtimeTool(event);
         break;
+      case "response.created":
+        realtimeResponseActiveRef.current = true;
+        break;
       case "response.done":
         setSending(false);
+        completeRealtimeResponse();
         break;
       case "error":
+        realtimeResponseActiveRef.current = false;
+        pendingRealtimeResponsesRef.current = [];
         setSending(false);
         setError(event.error?.message ?? "音声セッションでエラーが発生しました。");
         break;
@@ -328,7 +459,14 @@ export default function Home() {
     setError("");
     setTranscribing(true);
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          autoGainControl: true,
+          channelCount: 1,
+          echoCancellation: true,
+          noiseSuppression: true,
+        },
+      });
       microphoneRef.current = stream;
       const session = await jsonRequest<{ clientSecret: string; callsUrl: string }>("/api/realtime/session", { method: "POST" });
       const peer = new RTCPeerConnection();
@@ -371,6 +509,7 @@ export default function Home() {
   }
 
   async function stopAgent() {
+    pendingRealtimeResponsesRef.current = [];
     dataChannelRef.current?.send(JSON.stringify({ type: "response.cancel" }));
     setSending(false);
     setBrowserBusy(false);
@@ -400,7 +539,7 @@ export default function Home() {
           type: "conversation.item.create",
           item: { type: "message", role: "user", content: [{ type: "input_text", text: decision === "approve" ? "画面で操作を承認しました。結果を説明してください。" : "画面で操作を拒否しました。別の方法を提案してください。" }] },
         }));
-        dataChannelRef.current.send(JSON.stringify({ type: "response.create" }));
+        requestRealtimeResponse();
       }
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "承認を処理できませんでした。");
@@ -456,9 +595,9 @@ export default function Home() {
 
           <div className="browser-stage">
             {(browserBusy || !state) && <div className="browser-loader"><LoaderCircle size={26} className="spin" /><span>{state?.browserStatus === "agent_running" ? "AIがページを操作しています" : "ブラウザを同期しています"}</span></div>}
-            {state?.browserStatus !== "failed" && (
+            {state?.browserStatus !== "failed" && browserFrameUrl && (
               // eslint-disable-next-line @next/next/no-img-element
-              <img src={`/api/browser?frame=${frame}`} alt="Lexus公式サイトのライブブラウザ画面" draggable={false} onClick={handleBrowserClick} onLoad={() => setBrowserBusy(false)} onError={() => setBrowserBusy(false)} />
+              <img src={browserFrameUrl} alt="Lexus公式サイトのライブブラウザ画面" draggable={false} onClick={handleBrowserClick} onLoad={() => { browserFrameRevisionRef.current = pendingFrameRevisionRef.current; }} />
             )}
             {state?.browserStatus === "failed" && <div className="browser-empty"><PanelRight size={28} /><strong>ブラウザを開始できませんでした</strong><button onClick={() => window.location.reload()}>再試行</button></div>}
           </div>

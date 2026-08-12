@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import { browserManager } from "@/lib/browser";
+import { stopComputerUse } from "@/lib/computer-use";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -15,16 +16,18 @@ const actionSchema = z.object({
   url: z.string().url().optional(),
   actor: z.enum(["user", "agent"]).default("user"),
   operationId: z.string().uuid().optional(),
+  expectedFrameRevision: z.number().int().positive().optional(),
 });
 
 export async function GET() {
   try {
-    const image = await browserManager.screenshot();
-    return new NextResponse(new Uint8Array(image), {
+    const frame = await browserManager.captureFrame();
+    return new NextResponse(new Uint8Array(frame.image), {
       headers: {
         "Content-Type": "image/jpeg",
         "Cache-Control": "no-store, max-age=0",
         "X-Content-Type-Options": "nosniff",
+        "X-Browser-Frame-Revision": String(frame.revision),
       },
     });
   } catch (error) {
@@ -41,14 +44,19 @@ export async function POST(request: Request) {
     return NextResponse.json({ code: "INVALID_ACTION", issues: parsed.error.issues }, { status: 400 });
   }
 
-  const { operationId, ...action } = parsed.data;
+  const { operationId, expectedFrameRevision, ...action } = parsed.data;
   try {
-    await browserManager.execute(action, operationId);
+    if (action.actor === "user") stopComputerUse();
+    await browserManager.execute(action, operationId, expectedFrameRevision);
     return NextResponse.json({ ok: true });
   } catch (error) {
     const message = error instanceof Error ? error.message : "操作できませんでした。";
+    const frameStale = message.includes("BROWSER_FRAME_STALE");
     return NextResponse.json(
-      { code: message.includes("DOMAIN_NOT_ALLOWED") ? "DOMAIN_NOT_ALLOWED" : "BROWSER_ACTION_FAILED", message },
+      {
+        code: frameStale ? "BROWSER_FRAME_STALE" : message.includes("DOMAIN_NOT_ALLOWED") ? "DOMAIN_NOT_ALLOWED" : "BROWSER_ACTION_FAILED",
+        message: frameStale ? "画面が更新されました。最新の画面でもう一度操作してください。" : message,
+      },
       { status: 409 },
     );
   }

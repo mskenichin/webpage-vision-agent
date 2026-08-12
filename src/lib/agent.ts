@@ -1,6 +1,6 @@
 import { browserManager } from "./browser";
 import type { BrowserAction } from "./domain";
-import { runBrowserTask, vehicleModelRequest } from "./browser-task";
+import { browserTaskRequest, runBrowserTask } from "./browser-task";
 import { runComputerUse } from "./computer-use";
 import { delegateComplexQuery } from "./delegation";
 import { requestFoundryResponse } from "./foundry";
@@ -30,8 +30,8 @@ export async function runAgent(prompt: string) {
   const state = store.snapshot();
   let action: BrowserAction | null = null;
   let usedFoundry = false;
-  const browserIntent = /見せ|開い|表示|探し|検索|ページ|サイト|モデル一覧|車種一覧/i.test(prompt);
-  const explicitModel = vehicleModelRequest(prompt);
+  const explicitModel = browserTaskRequest(prompt, state.currentUrl);
+  const browserIntent = Boolean(explicitModel) || /見せ|開い|表示|探し|検索|ページ|サイト|モデル一覧|車種一覧/i.test(prompt);
 
   if (browserIntent && explicitModel) {
     await runBrowserTask(prompt);
@@ -56,10 +56,12 @@ export async function runAgent(prompt: string) {
   if (store.snapshot().browserStatus === "agent_running") store.setBrowser("ready");
 
   try {
+    const responseState = store.snapshot();
+    const pageContext = await browserManager.pageContext();
     if (/比較|おすすめ|推薦|違い|条件|どちら|メリット|デメリット/i.test(prompt)) {
-      return (await delegateComplexQuery(prompt, state.profile, state.messages, store.snapshot().currentUrl)).text;
+      return (await delegateComplexQuery(prompt, responseState.profile, responseState.messages, pageContext.url, responseState.interests, pageContext)).text;
     }
-    return await requestFoundryResponse(prompt, state.profile, state.messages, store.snapshot().currentUrl);
+    return await requestFoundryResponse(prompt, responseState.profile, responseState.messages, pageContext.url, responseState.interests, pageContext);
   } catch {
     const operation = action
       ? "左のブラウザを更新しました。"

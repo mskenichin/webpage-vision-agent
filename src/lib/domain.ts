@@ -44,6 +44,13 @@ export interface Interest {
   updatedAt: string;
 }
 
+export interface PageContext {
+  url: string;
+  title: string;
+  text: string;
+  scope?: "page" | "viewport";
+}
+
 export interface ChatMessage {
   id: string;
   role: "user" | "assistant" | "system";

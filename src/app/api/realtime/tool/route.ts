@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
+import { browserManager } from "@/lib/browser";
 import { runBrowserTask } from "@/lib/browser-task";
 import { stopComputerUse } from "@/lib/computer-use";
 import { delegateComplexQuery } from "@/lib/delegation";
@@ -19,10 +20,13 @@ export async function POST(request: Request) {
   try {
     if (parsed.data.name === "delegate_complex_query") {
       const state = store.snapshot();
-      const result = await delegateComplexQuery(parsed.data.arguments.query, state.profile, state.messages, state.currentUrl);
+      const pageContext = await browserManager.pageContext(parsed.data.arguments.query, true);
+      const result = await delegateComplexQuery(parsed.data.arguments.query, state.profile, state.messages, pageContext.url, state.interests, pageContext);
       return NextResponse.json(result);
     }
-    return NextResponse.json(await runBrowserTask(parsed.data.arguments.goal));
+    const result = await runBrowserTask(parsed.data.arguments.goal);
+    const pageContext = await browserManager.pageContext(parsed.data.arguments.goal, true);
+    return NextResponse.json({ ...result, pageContext });
   } catch (error) {
     console.error("Realtime tool failed", error);
     return NextResponse.json({ code: "TOOL_UNAVAILABLE", message: "要求された処理を完了できませんでした。" }, { status: 502 });

@@ -61,6 +61,7 @@ async function runLoop(goal: string, progress: RunProgress, signal: AbortSignal)
         deployment,
         progress.previous,
         signal,
+        state.interests,
       );
       if (!result) {
         if (progress.steps === 0 && emptyPlans === 0) {
@@ -68,7 +69,15 @@ async function runLoop(goal: string, progress: RunProgress, signal: AbortSignal)
           progress.previous = undefined;
           continue;
         }
-        if (progress.steps === 0) throw new Error("COMPUTER_USE_NO_ACTION");
+        if (progress.steps === 0) {
+          const state = store.snapshot();
+          return {
+            ok: false,
+            steps: 0,
+            currentUrl: state.currentUrl,
+            message: "該当箇所へ移動できませんでした。現在表示中の内容だけを案内します。",
+          };
+        }
         break;
       }
       progress.previous = { responseId: result.responseId, callId: result.callId };
@@ -77,7 +86,9 @@ async function runLoop(goal: string, progress: RunProgress, signal: AbortSignal)
         continue;
       }
       if (!result.action) break;
+      if (signal.aborted) throw new Error("AGENT_STOPPED");
       const localRisk = await browserManager.inspectActionRisk(result.action);
+      if (signal.aborted) throw new Error("AGENT_STOPPED");
       if (localRisk) {
         result.safetyChecks.push({ id: crypto.randomUUID(), code: "local_sensitive_action", message: localRisk });
       }

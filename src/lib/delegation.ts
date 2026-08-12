@@ -1,5 +1,7 @@
 import { DefaultAzureCredential } from "@azure/identity";
-import type { ChatMessage, Profile } from "./domain";
+import type { ChatMessage, Interest, PageContext, Profile } from "./domain";
+import { pageContextInstructions } from "./page-context";
+import { profileInstructions } from "./profile-context";
 
 interface OutputItem {
   content?: Array<{ type?: string; text?: string }>;
@@ -11,6 +13,8 @@ async function requestModel(
   profile: Profile,
   messages: ChatMessage[],
   currentUrl: string,
+  interests: Interest[],
+  pageContext: PageContext | undefined,
   signal: AbortSignal,
 ) {
   const endpoint = process.env.AZURE_FOUNDRY_ENDPOINT?.replace(/\/$/, "");
@@ -27,7 +31,7 @@ async function requestModel(
     signal,
     body: JSON.stringify({
       model,
-      instructions: `Lexusの日本語コンシェルジュとして、正確かつ簡潔に3文以内で答えてください。現在URL: ${currentUrl}\nプロファイル: ${JSON.stringify(profile)}`,
+      instructions: `Lexusの日本語コンシェルジュとして、表示中ページの内容を確認した上で、正確かつ簡潔に3文以内で答えてください。\n${profileInstructions(profile, interests)}\n現在URL: ${currentUrl}\n${pageContextInstructions(pageContext)}`,
       input: history,
       store: false,
     }),
@@ -55,12 +59,14 @@ export async function delegateComplexQuery(
   profile: Profile,
   messages: ChatMessage[],
   currentUrl: string,
+  interests: Interest[] = [],
+  pageContext?: PageContext,
 ) {
   const primary = process.env.AZURE_EXPERT_MODEL ?? "gpt-5.6-sol";
   const fallback = process.env.AZURE_CHAT_MODEL ?? "gpt-5.4";
   try {
-    return { text: await withTimeout(8_000, (signal) => requestModel(primary, query, profile, messages, currentUrl, signal)), model: primary };
+    return { text: await withTimeout(8_000, (signal) => requestModel(primary, query, profile, messages, currentUrl, interests, pageContext, signal)), model: primary };
   } catch {
-    return { text: await withTimeout(12_000, (signal) => requestModel(fallback, query, profile, messages, currentUrl, signal)), model: fallback };
+    return { text: await withTimeout(12_000, (signal) => requestModel(fallback, query, profile, messages, currentUrl, interests, pageContext, signal)), model: fallback };
   }
 }

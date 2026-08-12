@@ -1,5 +1,6 @@
 import { chromium, type Browser, type BrowserContext, type Page } from "playwright";
-import type { Actor, BrowserAction } from "./domain";
+import type { Actor, BrowserAction, PageContext } from "./domain";
+import { normalizePageText } from "./page-context";
 import { store } from "./store";
 
 const START_URL = "https://lexus.jp/";
@@ -18,13 +19,42 @@ export function requiresRiskInspection(action: BrowserAction) {
   return action.type === "click" || action.type === "type" || (action.type === "key" && action.key === "Enter");
 }
 
+export function revealQueryText(query: string) {
+  const aliases: Array<[RegExp, string]> = [
+    [/セダン(?:タイプ)?/i, "sedan"],
+    [/ミニバン/i, "minivan"],
+    [/クーペ/i, "coupe"],
+    [/電気自動車/i, "BEV"],
+  ];
+  return aliases.reduce(
+    (expanded, [pattern, alias]) => pattern.test(query) ? `${expanded} ${alias}` : expanded,
+    query,
+  );
+}
+
 class BrowserManager {
   private browser: Browser | null = null;
   private context: BrowserContext | null = null;
   private page: Page | null = null;
   private startPromise: Promise<void> | null = null;
+  private operationTail: Promise<void> = Promise.resolve();
+  private frameRevision = 0;
   private activeActor: Actor = "user";
   private activeOperationId = crypto.randomUUID();
+
+  private async serialize<T>(operation: () => Promise<T>) {
+    const previous = this.operationTail;
+    let release: () => void = () => undefined;
+    this.operationTail = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await previous;
+    try {
+      return await operation();
+    } finally {
+      release();
+    }
+  }
 
   async start() {
     if (this.page && !this.page.isClosed()) return;
@@ -54,6 +84,7 @@ class BrowserManager {
         void this.recordPageView(url, this.activeActor, `${this.activeOperationId}:view`);
       });
       await this.page.goto(START_URL, { waitUntil: "domcontentloaded", timeout: 45_000 });
+      this.frameRevision += 1;
       store.setBrowser("ready", this.page.url());
     } catch (error) {
       store.setBrowser("failed");
@@ -70,10 +101,103 @@ class BrowserManager {
     this.browser = null;
   }
 
+  async captureFrame() {
+    return this.serialize(async () => {
+      await this.start();
+      if (!this.page) throw new Error("Browser session is not available");
+      let image: Buffer;
+      try {
+        image = await this.page.screenshot({ type: "jpeg", quality: 72, animations: "disabled" });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (!/Target (?:page, context or browser has been closed|crashed)/i.test(message)) throw error;
+        await this.close();
+        await this.start();
+        if (!this.page) throw new Error("Browser session is not available");
+        image = await this.page.screenshot({ type: "jpeg", quality: 72, animations: "disabled" });
+      }
+      return { image, revision: this.frameRevision };
+    });
+  }
+
   async screenshot() {
-    await this.start();
-    if (!this.page) throw new Error("Browser session is not available");
-    return this.page.screenshot({ type: "jpeg", quality: 72, animations: "disabled" });
+    return (await this.captureFrame()).image;
+  }
+
+  async pageContext(query?: string, visibleOnly = false): Promise<PageContext> {
+    return this.serialize(async () => {
+      await this.start();
+      if (!this.page) throw new Error("Browser session is not available");
+      const page = this.page;
+      const text = await page.evaluate((viewportOnly) => {
+        const root = document.querySelector("main") ?? document.body;
+        if (viewportOnly) {
+          const selectors = "h1, h2, h3, h4, h5, h6, p, li, dt, dd, figcaption, summary, a, button, [role=heading], [role=tab]";
+          const visibleText = [...root.querySelectorAll<HTMLElement>(selectors)]
+            .filter((element) => {
+              const rect = element.getBoundingClientRect();
+              const style = getComputedStyle(element);
+              return element.offsetParent !== null
+                && style.visibility !== "hidden"
+                && Number(style.opacity) > 0
+                && rect.width > 0
+                && rect.height > 0
+                && rect.bottom > 0
+                && rect.top < innerHeight
+                && rect.right > 0
+                && rect.left < innerWidth;
+            })
+            .map((element) => (element.innerText || element.getAttribute("aria-label") || "").trim())
+            .filter(Boolean);
+          return [...new Set(visibleText)].join("\n");
+        }
+        return root?.innerText ?? "";
+      }, visibleOnly);
+      return {
+        url: page.url(),
+        title: await page.title().catch(() => "Lexus"),
+        text: normalizePageText(text, query),
+        scope: visibleOnly ? "viewport" : "page",
+      };
+    });
+  }
+
+  async revealRelevantContent(query: string) {
+    return this.serialize(async () => {
+      await this.start();
+      if (!this.page) throw new Error("Browser session is not available");
+      const result = await this.page.evaluate(async (rawQuery) => {
+        const queryText = rawQuery
+          .replace(/について|を教えて|教えて|を知りたい|知りたい|を見せて|見せて|を表示して|表示して|ください/g, "")
+          .toLocaleLowerCase("ja-JP")
+          .replace(/[\s\p{P}\p{S}]/gu, "");
+        const pairs = (text: string) => {
+          const compact = text.toLocaleLowerCase("ja-JP").replace(/[\s\p{P}\p{S}]/gu, "");
+          return new Set(Array.from({ length: Math.max(0, compact.length - 1) }, (_, index) => compact.slice(index, index + 2)));
+        };
+        const queryPairs = pairs(queryText);
+        const root = document.querySelector("main") ?? document.body;
+        const candidates = [...root.querySelectorAll<HTMLElement>("h1, h2, h3, h4, p, li, a, button, summary, [role=tab]")]
+          .map((element) => {
+            const text = (element.innerText || element.getAttribute("aria-label") || "").trim().replace(/\s+/g, " ");
+            const overlap = [...pairs(text)].filter((pair) => queryPairs.has(pair)).length;
+            const headingBonus = /^H[1-4]$/.test(element.tagName) && overlap > 0 ? 2 : 0;
+            return { element, text, score: overlap + headingBonus };
+          })
+          .filter(({ element, text, score }) => score > 0 && text.length >= 2 && text.length <= 500 && element.offsetParent !== null)
+          .sort((left, right) => right.score - left.score);
+        const match = candidates[0];
+        if (!match) return { found: false as const };
+        const scrollBehavior = document.documentElement.style.scrollBehavior;
+        document.documentElement.style.scrollBehavior = "auto";
+        match.element.scrollIntoView({ block: "center", inline: "nearest" });
+        await new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
+        document.documentElement.style.scrollBehavior = scrollBehavior;
+        return { found: true as const, label: match.text.slice(0, 160) };
+      }, revealQueryText(query));
+      if (result.found) this.frameRevision += 1;
+      return result;
+    });
   }
 
   async inspectActionRisk(action: BrowserAction) {
@@ -106,44 +230,52 @@ class BrowserManager {
     }, { type: action.type, x: action.x, y: action.y });
   }
 
-  async execute(action: BrowserAction, operationId = crypto.randomUUID()) {
-    await this.start();
-    if (!this.page) throw new Error("Browser session is not available");
-
-    this.activeActor = action.actor;
-    this.activeOperationId = operationId;
-    store.setBrowser(action.actor === "agent" ? "agent_running" : "user_controlled");
-
-    try {
-      switch (action.type) {
-        case "click":
-          await this.click(action.x ?? 0, action.y ?? 0, action.actor, operationId);
-          break;
-        case "scroll":
-          await this.page.mouse.wheel(0, action.deltaY ?? 600);
-          break;
-        case "type":
-          await this.page.keyboard.insertText(action.text ?? "");
-          break;
-        case "key":
-          await this.page.keyboard.press(action.key ?? "Enter");
-          break;
-        case "back":
-          await this.page.goBack({ waitUntil: "domcontentloaded", timeout: 30_000 });
-          break;
-        case "reload":
-          await this.page.reload({ waitUntil: "domcontentloaded", timeout: 30_000 });
-          break;
-        case "navigate":
-          if (!action.url || !isAllowedUrl(action.url)) throw new Error("DOMAIN_NOT_ALLOWED");
-          await this.page.goto(action.url, { waitUntil: "domcontentloaded", timeout: 45_000 });
-          break;
+  async execute(action: BrowserAction, operationId = crypto.randomUUID(), expectedFrameRevision?: number) {
+    return this.serialize(async () => {
+      await this.start();
+      if (!this.page) throw new Error("Browser session is not available");
+      if (expectedFrameRevision !== undefined && expectedFrameRevision !== this.frameRevision) {
+        throw new Error("BROWSER_FRAME_STALE");
       }
-      store.setBrowser("ready", this.page.url());
-    } catch (error) {
-      store.setBrowser("ready", this.page.url());
-      throw error;
-    }
+
+      this.activeActor = action.actor;
+      this.activeOperationId = operationId;
+      store.setBrowser(action.actor === "agent" ? "agent_running" : "user_controlled");
+
+      try {
+        switch (action.type) {
+          case "click":
+            await this.click(action.x ?? 0, action.y ?? 0, action.actor, operationId);
+            break;
+          case "scroll":
+            await this.page.mouse.wheel(0, action.deltaY ?? 600);
+            break;
+          case "type":
+            await this.page.keyboard.insertText(action.text ?? "");
+            break;
+          case "key":
+            await this.page.keyboard.press(action.key ?? "Enter");
+            break;
+          case "back":
+            await this.page.goBack({ waitUntil: "domcontentloaded", timeout: 30_000 });
+            break;
+          case "reload":
+            await this.page.reload({ waitUntil: "domcontentloaded", timeout: 30_000 });
+            break;
+          case "navigate":
+            if (!action.url || !isAllowedUrl(action.url)) throw new Error("DOMAIN_NOT_ALLOWED");
+            if (!await this.clickMatchingLink(action.url, action.actor, operationId)) {
+              await this.page.goto(action.url, { waitUntil: "domcontentloaded", timeout: 45_000 });
+            }
+            break;
+        }
+        this.frameRevision += 1;
+        store.setBrowser("ready", this.page.url());
+      } catch (error) {
+        store.setBrowser("ready", this.page.url());
+        throw error;
+      }
+    });
   }
 
   private async click(x: number, y: number, actor: Actor, operationId: string) {
@@ -175,6 +307,30 @@ class BrowserManager {
     }
   }
 
+  private async clickMatchingLink(targetUrl: string, actor: Actor, operationId: string) {
+    if (!this.page) return false;
+    const point = await this.page.evaluate((target) => {
+      const normalized = (value: string) => {
+        const url = new URL(value, location.href);
+        url.hash = "";
+        return url.href.replace(/\/$/, "");
+      };
+      const expected = normalized(target);
+      const anchor = [...document.querySelectorAll<HTMLAnchorElement>("a[href]")].find((candidate) => {
+        const rect = candidate.getBoundingClientRect();
+        return candidate.offsetParent !== null && rect.width > 0 && rect.height > 0 && normalized(candidate.href) === expected;
+      });
+      if (!anchor) return null;
+      anchor.scrollIntoView({ block: "center", inline: "nearest" });
+      const rect = anchor.getBoundingClientRect();
+      return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
+    }, targetUrl);
+    if (!point) return false;
+    await this.click(point.x, point.y, actor, operationId);
+    await this.page.waitForURL((url) => url.href.replace(/\/$/, "") === targetUrl.replace(/\/$/, ""), { timeout: 5_000 }).catch(() => undefined);
+    return this.page.url().replace(/\/$/, "") === targetUrl.replace(/\/$/, "");
+  }
+
   private async recordPageView(url: string, actor: Actor, operationId: string) {
     const title = await this.page?.title().catch(() => "Lexus") ?? "Lexus";
     store.setBrowser("ready", url);
@@ -193,7 +349,9 @@ declare global {
   var webpageVisionBrowser: BrowserManager | undefined;
 }
 
-export const browserManager = globalThis.webpageVisionBrowser ?? new BrowserManager();
+const existingBrowserManager = globalThis.webpageVisionBrowser;
+if (existingBrowserManager) Object.setPrototypeOf(existingBrowserManager, BrowserManager.prototype);
+export const browserManager = existingBrowserManager ?? new BrowserManager();
 if (process.env.NODE_ENV !== "production") globalThis.webpageVisionBrowser = browserManager;
 
 export { START_URL, VIEWPORT };
