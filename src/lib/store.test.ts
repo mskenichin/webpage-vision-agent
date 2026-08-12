@@ -66,15 +66,15 @@ describe("DemoStore messages", () => {
 });
 
 describe("DemoStore process logs", () => {
-  it("keeps process logs when chat messages are cleared", () => {
+  it("clears chat messages and process logs together", () => {
     const store = new DemoStore();
+    const sessionId = store.snapshot().sessionId;
+    store.addMessage("user", "NXを見せて");
     store.addProcessLog("agent", "success", "LLM応答を生成しました", "NXをご案内します。");
 
-    store.clearMessages();
+    store.clearConversation();
 
-    expect(store.snapshot().processLogs).toMatchObject([
-      { source: "agent", level: "success", message: "LLM応答を生成しました", detail: "NXをご案内します。" },
-    ]);
+    expect(store.snapshot()).toMatchObject({ sessionId, messages: [], processLogs: [] });
   });
 
   it("retains only the latest 200 process logs", () => {

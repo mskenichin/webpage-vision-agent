@@ -349,13 +349,13 @@ export default function Home() {
     }
   }
 
-  async function clearChat() {
+  async function clearConversation() {
     setError("");
     stopSpeech();
     try {
       setState(await jsonRequest<AppState>("/api/chat", { method: "DELETE" }));
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "チャットをクリアできませんでした。");
+      setError(cause instanceof Error ? cause.message : "チャットと処理ログをクリアできませんでした。");
     }
   }
 
@@ -736,7 +736,7 @@ export default function Home() {
             <div><span className="eyebrow">AI CONCIERGE</span><h2>ご希望を伺います</h2></div>
             <div className="chat-heading-actions">
               <button className={`icon-button compact ${logsVisible ? "is-active" : ""}`} title={logsVisible ? "処理ログを非表示" : "処理ログを表示"} aria-label={logsVisible ? "処理ログを非表示" : "処理ログを表示"} aria-pressed={logsVisible} onClick={() => setLogsVisible((value) => !value)}><ScrollText size={17} /></button>
-              <button className="icon-button compact" title="チャットをクリア" aria-label="チャットをクリア" disabled={sending || !state?.messages.length} onClick={() => void clearChat()}><Trash2 size={17} /></button>
+              <button className="icon-button compact" title="チャットと処理ログをクリア" aria-label="チャットと処理ログをクリア" disabled={sending || (!state?.messages.length && !state?.processLogs.length)} onClick={() => void clearConversation()}><Trash2 size={17} /></button>
               <button className="icon-button compact" title={voiceMuted ? "読み上げを有効化" : "読み上げをミュート"} onClick={() => { stopSpeech(); setVoiceMuted((value) => { const next = !value; if (realtimeAudioRef.current) realtimeAudioRef.current.muted = next; return next; }); }}>{voiceMuted ? <VolumeX size={17} /> : <Volume2 size={17} />}</button>
             </div>
           </div>

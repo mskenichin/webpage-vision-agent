@@ -30,6 +30,6 @@ export async function POST(request: Request) {
 }
 
 export async function DELETE() {
-  store.clearMessages();
+  store.clearConversation();
   return NextResponse.json(store.snapshot());
 }

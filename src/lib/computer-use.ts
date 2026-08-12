@@ -62,7 +62,6 @@ async function runLoop(goal: string, progress: RunProgress, signal: AbortSignal)
   const deployment = process.env.AZURE_COMPUTER_MODEL ?? process.env.AZURE_CHAT_MODEL ?? "gpt-5.4";
   if (!deployment) throw new Error("COMPUTER_USE_UNAVAILABLE");
   const seen = new Map<string, number>();
-  let emptyPlans = 0;
   store.setBrowser("agent_running");
 
   try {
@@ -70,30 +69,22 @@ async function runLoop(goal: string, progress: RunProgress, signal: AbortSignal)
       if (signal.aborted) throw new Error("AGENT_STOPPED");
       const state = store.snapshot();
       const result = await requestFoundryComputerStep(
-        emptyPlans > 0 ? `${goal}\nまだ目的を達成していません。画面を操作して目的のページを表示してください。` : goal,
-        await browserManager.screenshot(),
+        goal,
+        await browserManager.computerScreenshot(),
         state.profile,
         deployment,
         progress.previous,
         signal,
         state.interests,
       );
-      if (!result) {
-        if (progress.steps === 0 && emptyPlans === 0) {
-          emptyPlans += 1;
-          progress.previous = undefined;
-          continue;
-        }
-        if (progress.steps === 0) {
-          const state = store.snapshot();
-          return {
-            ok: false,
-            steps: 0,
-            currentUrl: state.currentUrl,
-            message: "該当箇所へ移動できませんでした。現在表示中の内容だけを案内します。",
-          };
-        }
-        break;
+      if (result.completed) {
+        const completedState = store.snapshot();
+        return {
+          ok: true,
+          steps: progress.steps,
+          currentUrl: completedState.currentUrl,
+          message: progress.steps > 0 ? "ブラウザ操作と表示確認を完了しました。" : "現在の画面で目的の内容を確認しました。",
+        };
       }
       progress.previous = { responseId: result.responseId, callId: result.callId };
       if (result.observationOnly) {

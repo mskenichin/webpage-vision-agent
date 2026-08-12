@@ -137,6 +137,20 @@ class BrowserManager {
     return (await this.captureFrame()).image;
   }
 
+  async computerScreenshot() {
+    return this.serialize(async () => {
+      await this.start();
+      if (!this.page) throw new Error("Browser session is not available");
+      await this.page.waitForLoadState("domcontentloaded", { timeout: 5_000 }).catch(() => undefined);
+      await this.page.waitForTimeout(500);
+      await this.page.evaluate(async () => {
+        await document.fonts.ready;
+        await new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
+      }).catch(() => undefined);
+      return this.page.screenshot({ type: "jpeg", quality: 72, animations: "disabled" });
+    });
+  }
+
   async subscribeFrames(subscriber: (frame: BrowserStreamFrame) => void) {
     this.ensureStreamState();
     this.streamSubscribers.add(subscriber);

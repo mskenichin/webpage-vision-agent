@@ -101,6 +101,11 @@ export class DemoStore {
     this.state.messages = [];
   }
 
+  clearConversation() {
+    this.state.messages = [];
+    this.state.processLogs = [];
+  }
+
   addProcessLog(source: ProcessLog["source"], level: ProcessLog["level"], message: string, detail?: string) {
     const log: ProcessLog = {
       id: crypto.randomUUID(),
@@ -160,6 +165,7 @@ const compatibleStore = globalThis.webpageVisionStore;
 export const store = compatibleStore
   && typeof compatibleStore.clearApproval === "function"
   && typeof compatibleStore.clearMessages === "function"
+  && typeof compatibleStore.clearConversation === "function"
   && typeof compatibleStore.addProcessLog === "function"
   ? compatibleStore
   : new DemoStore();
