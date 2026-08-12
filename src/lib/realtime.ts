@@ -66,7 +66,7 @@ export async function createRealtimeSession(profile: Profile, currentUrl: string
           {
             type: "function",
             name: "request_browser_task",
-            description: "Lexus公式サイト内で情報を探索し、必要なページを表示する。閲覧・検索・比較の操作だけに使用する。",
+            description: "Lexus公式サイト内でページを探索・表示し、クリック、スクロール、色・グレード・オプションなど表示中UIの選択を変更する。ユーザーが画面操作を求めた場合に使用する。",
             parameters: {
               type: "object",
               properties: { goal: { type: "string", description: "達成する閲覧上の目的" } },

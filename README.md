@@ -9,7 +9,7 @@ Lexus公式サイトを左ペインの隔離ブラウザで表示し、右ペイ
 - テキストチャットとモデルページへのデモナビゲーション
 - Foundry `gpt-realtime-2.1-mini` とWebRTCによる日本語の連続音声対話、semantic VAD、途中字幕、割り込み
 - 複雑な比較・推薦を `gpt-5.6-sol` へ委譲し、8秒で `gpt-5.4` へフォールバックする高水準tool
-- 最大20ステップ・120秒、反復停止、許可ドメイン検証を備えた `computer-use-preview` ブラウザ操作
+- 最大20ステップ・120秒、反復停止、許可ドメイン検証を備えたResponses API組み込み`computer`ツールによるブラウザ操作
 - モデル安全確認とDOM検査を組み合わせた重要操作の承認・拒否、操作中断
 - Microsoft Foundry Responses APIアダプターとDefaultAzureCredential認証
 - 手動・AI操作共通の閲覧・リンククリック履歴
@@ -44,7 +44,7 @@ npm run dev
 
 ```dotenv
 AZURE_FOUNDRY_ENDPOINT=https://<foundry-resource-endpoint>
-AZURE_FOUNDRY_MODEL=computer-use-preview
+AZURE_COMPUTER_MODEL=gpt-5.4
 AZURE_FOUNDRY_PROJECT_ENDPOINT=https://<resource>.services.ai.azure.com/api/projects/<project>
 AZURE_REALTIME_MODEL=gpt-realtime-2.1-mini
 AZURE_REALTIME_VOICE=alloy
@@ -86,7 +86,7 @@ npm test       # Vitest
 | Foundry Project | `aif-webpage-vision-agent-project` | East US 2 |
 | Realtime deployment | `gpt-realtime-2.1-mini` | East US 2 |
 | Expert deployment | `gpt-5.6-sol` | East US 2 |
-| Computer Use deployment | `computer-use-preview` | East US 2 |
+| Computer Use deployment | `gpt-5.4`の組み込み`computer`ツール | East US 2 |
 | Chat deployment | `gpt-5.4` (`2026-03-05`) | East US 2 |
 | Transcription deployment | `gpt-4o-mini-transcribe` (`2025-12-15`, GlobalStandard 60) | East US 2 |
 | Speech deployment | `gpt-4o-mini-tts` (`2025-12-15`, GlobalStandard 300) | East US 2 |

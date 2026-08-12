@@ -1,5 +1,15 @@
 import { describe, expect, it } from "vitest";
-import { requiresRiskInspection, revealQueryText } from "./browser";
+import { isAllowedUrl, requiresRiskInspection, revealQueryText } from "./browser";
+
+describe("isAllowedUrl", () => {
+  it("allows only HTTPS URLs on Lexus domains", () => {
+    expect(isAllowedUrl("https://lexus.jp/models/is/")).toBe(true);
+    expect(isAllowedUrl("https://www.lexus.jp/models/is/")).toBe(true);
+    expect(isAllowedUrl("http://lexus.jp/models/is/")).toBe(false);
+    expect(isAllowedUrl("https://example.com/")).toBe(false);
+    expect(isAllowedUrl("https://lexus.jp.example.com/")).toBe(false);
+  });
+});
 
 describe("revealQueryText", () => {
   it("adds English page-heading aliases for Japanese vehicle types", () => {

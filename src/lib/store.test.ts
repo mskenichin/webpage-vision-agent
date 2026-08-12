@@ -12,7 +12,7 @@ function pendingApproval(): PendingApproval {
       expiresAt: new Date(Date.now() + 60_000).toISOString(),
     },
     goal: "問い合わせを送信する",
-    action: { type: "click", x: 100, y: 100, actor: "agent" },
+    actions: [{ type: "click", x: 100, y: 100, actor: "agent" }],
     responseId: "response-1",
     callId: "call-1",
     safetyChecks: [{ id: "check-1", code: "external_side_effect", message: "送信操作です。" }],
@@ -62,5 +62,30 @@ describe("DemoStore messages", () => {
     store.clearMessages();
 
     expect(store.snapshot()).toMatchObject({ sessionId, messages: [] });
+  });
+});
+
+describe("DemoStore process logs", () => {
+  it("keeps process logs when chat messages are cleared", () => {
+    const store = new DemoStore();
+    store.addProcessLog("agent", "success", "LLM応答を生成しました", "NXをご案内します。");
+
+    store.clearMessages();
+
+    expect(store.snapshot().processLogs).toMatchObject([
+      { source: "agent", level: "success", message: "LLM応答を生成しました", detail: "NXをご案内します。" },
+    ]);
+  });
+
+  it("retains only the latest 200 process logs", () => {
+    const store = new DemoStore();
+    for (let index = 0; index < 201; index += 1) {
+      store.addProcessLog("system", "info", `処理 ${index}`);
+    }
+
+    const logs = store.snapshot().processLogs;
+    expect(logs).toHaveLength(200);
+    expect(logs[0].message).toBe("処理 1");
+    expect(logs.at(-1)?.message).toBe("処理 200");
   });
 });

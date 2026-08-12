@@ -1,4 +1,4 @@
-import { chromium, type Browser, type BrowserContext, type Page } from "playwright";
+import { chromium, type Browser, type BrowserContext, type CDPSession, type Page } from "playwright";
 import type { Actor, BrowserAction, PageContext } from "./domain";
 import { normalizePageText } from "./page-context";
 import { store } from "./store";
@@ -6,7 +6,15 @@ import { store } from "./store";
 const START_URL = "https://lexus.jp/";
 const VIEWPORT = { width: 1440, height: 900 };
 
-function isAllowedUrl(value: string) {
+export interface BrowserStreamFrame {
+  data: string;
+  width: number;
+  height: number;
+  sequence: number;
+  revision: number;
+}
+
+export function isAllowedUrl(value: string) {
   try {
     const url = new URL(value);
     return url.protocol === "https:" && (url.hostname === "lexus.jp" || url.hostname.endsWith(".lexus.jp"));
@@ -16,7 +24,7 @@ function isAllowedUrl(value: string) {
 }
 
 export function requiresRiskInspection(action: BrowserAction) {
-  return action.type === "click" || action.type === "type" || (action.type === "key" && action.key === "Enter");
+  return action.type === "click" || action.type === "double_click" || action.type === "type" || (action.type === "key" && action.key === "Enter");
 }
 
 export function revealQueryText(query: string) {
@@ -39,6 +47,9 @@ class BrowserManager {
   private startPromise: Promise<void> | null = null;
   private operationTail: Promise<void> = Promise.resolve();
   private frameRevision = 0;
+  private streamSequence = 0;
+  private cdpSession: CDPSession | null = null;
+  private streamSubscribers = new Set<(frame: BrowserStreamFrame) => void>();
   private activeActor: Actor = "user";
   private activeOperationId = crypto.randomUUID();
 
@@ -84,6 +95,7 @@ class BrowserManager {
         void this.recordPageView(url, this.activeActor, `${this.activeOperationId}:view`);
       });
       await this.page.goto(START_URL, { waitUntil: "domcontentloaded", timeout: 45_000 });
+      if (this.streamSubscribers.size > 0) await this.startScreencast();
       this.frameRevision += 1;
       store.setBrowser("ready", this.page.url());
     } catch (error) {
@@ -94,6 +106,7 @@ class BrowserManager {
   }
 
   async close() {
+    await this.stopScreencast();
     await this.context?.close().catch(() => undefined);
     await this.browser?.close().catch(() => undefined);
     this.page = null;
@@ -122,6 +135,64 @@ class BrowserManager {
 
   async screenshot() {
     return (await this.captureFrame()).image;
+  }
+
+  async subscribeFrames(subscriber: (frame: BrowserStreamFrame) => void) {
+    this.ensureStreamState();
+    this.streamSubscribers.add(subscriber);
+    await this.start();
+    await this.startScreencast();
+    return () => {
+      this.streamSubscribers.delete(subscriber);
+      if (this.streamSubscribers.size === 0) void this.stopScreencast();
+    };
+  }
+
+  private async startScreencast() {
+    this.ensureStreamState();
+    if (this.cdpSession || !this.context || !this.page || this.page.isClosed()) return;
+    const session = await this.context.newCDPSession(this.page);
+    this.cdpSession = session;
+    session.on("Page.screencastFrame", (event: {
+      data: string;
+      sessionId: number;
+      metadata?: { deviceWidth?: number; deviceHeight?: number };
+    }) => {
+      void session.send("Page.screencastFrameAck", { sessionId: event.sessionId }).catch(() => undefined);
+      const frame: BrowserStreamFrame = {
+        data: event.data,
+        width: event.metadata?.deviceWidth ?? VIEWPORT.width,
+        height: event.metadata?.deviceHeight ?? VIEWPORT.height,
+        sequence: ++this.streamSequence,
+        revision: this.frameRevision,
+      };
+      this.streamSubscribers.forEach((subscriber) => subscriber(frame));
+    });
+    session.on("close", () => {
+      if (this.cdpSession === session) this.cdpSession = null;
+    });
+    await session.send("Page.startScreencast", {
+      format: "jpeg",
+      quality: 72,
+      maxWidth: VIEWPORT.width,
+      maxHeight: VIEWPORT.height,
+      everyNthFrame: 1,
+    });
+  }
+
+  private async stopScreencast() {
+    this.ensureStreamState();
+    const session = this.cdpSession;
+    this.cdpSession = null;
+    if (!session) return;
+    await session.send("Page.stopScreencast").catch(() => undefined);
+    await session.detach().catch(() => undefined);
+  }
+
+  private ensureStreamState() {
+    this.streamSequence ??= 0;
+    this.cdpSession ??= null;
+    this.streamSubscribers ??= new Set();
   }
 
   async pageContext(query?: string, visibleOnly = false): Promise<PageContext> {
@@ -205,7 +276,7 @@ class BrowserManager {
     if (!this.page || action.actor !== "agent") return null;
     if (!requiresRiskInspection(action)) return null;
     return this.page.evaluate(({ type, x, y }) => {
-      const sensitive = /見積|試乗|来店|予約|問い合わせ|送信|確定|購入|契約|申し込|ログイン|アカウント|同意|アップロード|ダウンロード/i;
+      const sensitive = /送信|確定|完了|購入|契約|申し込|申込|ログイン|アカウント作成|同意|アップロード|ダウンロード/i;
       const personal = /氏名|名前|住所|メール|電話|郵便|生年月日|認証コード/i;
       const target = type === "click" ? document.elementFromPoint(x ?? 0, y ?? 0) : document.activeElement;
       if (!(target instanceof Element)) return null;
@@ -247,6 +318,9 @@ class BrowserManager {
           case "click":
             await this.click(action.x ?? 0, action.y ?? 0, action.actor, operationId);
             break;
+          case "double_click":
+            await this.page.mouse.dblclick(action.x ?? 0, action.y ?? 0);
+            break;
           case "scroll":
             await this.page.mouse.wheel(0, action.deltaY ?? 600);
             break;
@@ -255,6 +329,9 @@ class BrowserManager {
             break;
           case "key":
             await this.page.keyboard.press(action.key ?? "Enter");
+            break;
+          case "wait":
+            await this.page.waitForTimeout(1_000);
             break;
           case "back":
             await this.page.goBack({ waitUntil: "domcontentloaded", timeout: 30_000 });
@@ -280,19 +357,25 @@ class BrowserManager {
 
   private async click(x: number, y: number, actor: Actor, operationId: string) {
     if (!this.page) return;
-    const link = await this.page.evaluate(({ clickX, clickY }) => {
+    const target = await this.page.evaluate(({ clickX, clickY }) => {
       const element = document.elementFromPoint(clickX, clickY);
       const anchor = element?.closest("a");
-      if (!(anchor instanceof HTMLAnchorElement)) return null;
       return {
-        title: (anchor.textContent ?? "").trim().replace(/\s+/g, " ").slice(0, 160),
-        url: anchor.href,
+        tag: element?.tagName.toLocaleLowerCase() ?? "unknown",
+        label: (element?.getAttribute("aria-label") || element?.getAttribute("title") || "").trim().slice(0, 120),
+        link: anchor instanceof HTMLAnchorElement ? {
+          title: (anchor.textContent ?? "").trim().replace(/\s+/g, " ").slice(0, 160),
+          url: anchor.href,
+        } : null,
       };
     }, { clickX: x, clickY: y });
 
+    const link = target.link;
     if (link && !isAllowedUrl(link.url)) throw new Error("DOMAIN_NOT_ALLOWED");
+    store.addProcessLog("browser", "info", "ブラウザ上の要素をクリックしました", target.label ? `${target.tag}: ${target.label}` : target.tag);
     const sourceUrl = this.page.url();
     await this.page.mouse.click(x, y);
+    await this.page.waitForTimeout(150);
 
     if (link) {
       store.addActivity({

@@ -1,4 +1,4 @@
-import type { ActivityEvent, AppState, ApprovalRequest, BrowserAction, BrowserStatus, ChatMessage, Profile } from "./domain";
+import type { ActivityEvent, AppState, ApprovalRequest, BrowserAction, BrowserStatus, ChatMessage, ProcessLog, Profile } from "./domain";
 import { mergeInterests } from "./interests";
 
 const initialProfile: Profile = {
@@ -29,15 +29,16 @@ function createState(): AppState {
         createdAt: new Date().toISOString(),
       },
     ],
+    processLogs: [],
     approval: null,
-    agentMode: process.env.AZURE_FOUNDRY_ENDPOINT && (process.env.AZURE_CHAT_MODEL || process.env.AZURE_FOUNDRY_MODEL) ? "foundry" : "demo",
+    agentMode: process.env.AZURE_FOUNDRY_ENDPOINT && (process.env.AZURE_COMPUTER_MODEL || process.env.AZURE_CHAT_MODEL) ? "foundry" : "demo",
   };
 }
 
 export interface PendingApproval {
   request: ApprovalRequest;
   goal: string;
-  action: BrowserAction;
+  actions: BrowserAction[];
   responseId: string;
   callId: string;
   safetyChecks: Array<{ id: string; code: string; message: string }>;
@@ -100,6 +101,20 @@ export class DemoStore {
     this.state.messages = [];
   }
 
+  addProcessLog(source: ProcessLog["source"], level: ProcessLog["level"], message: string, detail?: string) {
+    const log: ProcessLog = {
+      id: crypto.randomUUID(),
+      source,
+      level,
+      message,
+      ...(detail ? { detail } : {}),
+      createdAt: new Date().toISOString(),
+    };
+    this.state.processLogs.push(log);
+    this.state.processLogs = this.state.processLogs.slice(-200);
+    return log;
+  }
+
   addActivity(event: Omit<ActivityEvent, "id" | "occurredAt">) {
     if (!this.state.profile.activityCollection) return null;
     const eventKey = `${event.sessionId}:${event.operationId}:${event.type}`;
@@ -145,6 +160,7 @@ const compatibleStore = globalThis.webpageVisionStore;
 export const store = compatibleStore
   && typeof compatibleStore.clearApproval === "function"
   && typeof compatibleStore.clearMessages === "function"
+  && typeof compatibleStore.addProcessLog === "function"
   ? compatibleStore
   : new DemoStore();
 if (process.env.NODE_ENV !== "production") globalThis.webpageVisionStore = store;

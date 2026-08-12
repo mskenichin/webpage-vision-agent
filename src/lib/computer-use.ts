@@ -11,6 +11,20 @@ function actionKey(action: BrowserAction | null) {
   return action ? JSON.stringify({ type: action.type, x: action.x, y: action.y, deltaY: action.deltaY, text: action.text, key: action.key, url: action.url }) : "done";
 }
 
+function actionDescription(action: BrowserAction) {
+  switch (action.type) {
+    case "click": return `クリック (${Math.round(action.x ?? 0)}, ${Math.round(action.y ?? 0)})`;
+    case "double_click": return `ダブルクリック (${Math.round(action.x ?? 0)}, ${Math.round(action.y ?? 0)})`;
+    case "scroll": return `スクロール (${Math.round(action.deltaY ?? 0)})`;
+    case "type": return "テキストを入力";
+    case "key": return `キー入力 (${action.key ?? "不明"})`;
+    case "wait": return "画面の更新を待機";
+    case "navigate": return action.url ?? "ページへ移動";
+    case "back": return "前のページへ戻る";
+    case "reload": return "ページを再読み込み";
+  }
+}
+
 interface RunProgress {
   steps: number;
   observations: number;
@@ -22,9 +36,10 @@ interface RunProgress {
 }
 
 function approvalFor(goal: string, result: ComputerStep, progress: RunProgress): PendingApproval {
-  const operation = result.action?.type === "type"
-    ? `「${result.action.text?.slice(0, 80) ?? "入力内容"}」を入力`
-    : `${result.action?.type ?? "操作"}を実行`;
+  const firstAction = result.actions[0];
+  const operation = firstAction?.type === "type"
+    ? `「${firstAction.text?.slice(0, 80) ?? "入力内容"}」を入力`
+    : result.actions.map(actionDescription).join("、") || "操作を実行";
   return {
     request: {
       id: crypto.randomUUID(),
@@ -34,7 +49,7 @@ function approvalFor(goal: string, result: ComputerStep, progress: RunProgress):
       expiresAt: new Date(Date.now() + 5 * 60_000).toISOString(),
     },
     goal,
-    action: result.action!,
+    actions: result.actions,
     responseId: result.responseId,
     callId: result.callId,
     safetyChecks: result.safetyChecks,
@@ -44,7 +59,7 @@ function approvalFor(goal: string, result: ComputerStep, progress: RunProgress):
 }
 
 async function runLoop(goal: string, progress: RunProgress, signal: AbortSignal) {
-  const deployment = process.env.AZURE_FOUNDRY_MODEL ?? "computer-use-preview";
+  const deployment = process.env.AZURE_COMPUTER_MODEL ?? process.env.AZURE_CHAT_MODEL ?? "gpt-5.4";
   if (!deployment) throw new Error("COMPUTER_USE_UNAVAILABLE");
   const seen = new Map<string, number>();
   let emptyPlans = 0;
@@ -85,24 +100,31 @@ async function runLoop(goal: string, progress: RunProgress, signal: AbortSignal)
         progress.observations += 1;
         continue;
       }
-      if (!result.action) break;
+      if (result.actions.length === 0) break;
       if (signal.aborted) throw new Error("AGENT_STOPPED");
-      const localRisk = await browserManager.inspectActionRisk(result.action);
-      if (signal.aborted) throw new Error("AGENT_STOPPED");
-      if (localRisk) {
-        result.safetyChecks.push({ id: crypto.randomUUID(), code: "local_sensitive_action", message: localRisk });
+      for (const action of result.actions) {
+        const localRisk = await browserManager.inspectActionRisk(action);
+        if (signal.aborted) throw new Error("AGENT_STOPPED");
+        if (localRisk) {
+          result.safetyChecks.push({ id: crypto.randomUUID(), code: "local_sensitive_action", message: localRisk });
+        }
       }
       if (result.safetyChecks.length > 0) {
         const pending = approvalFor(goal, result, progress);
         store.setApproval(pending);
+        store.addProcessLog("browser", "info", "Computer Useが承認を待っています", result.actions.map(actionDescription).join("、"));
         return { ok: false, awaitingApproval: true, approval: pending.request, steps: progress.steps, currentUrl: state.currentUrl };
       }
-      const key = actionKey(result.action);
+      const key = result.actions.map(actionKey).join("|");
       const repetitions = (seen.get(key) ?? 0) + 1;
       seen.set(key, repetitions);
       if (repetitions >= 3) throw new Error("COMPUTER_USE_REPEATED_ACTION");
-      await browserManager.execute(result.action, crypto.randomUUID());
-      progress.steps += 1;
+      if (progress.steps + result.actions.length > MAX_STEPS) throw new Error("COMPUTER_USE_MAX_STEPS");
+      for (const action of result.actions) {
+        store.addProcessLog("browser", "info", `Computer Useステップ ${progress.steps + 1}`, actionDescription(action));
+        await browserManager.execute(action, crypto.randomUUID());
+        progress.steps += 1;
+      }
     }
     const state = store.snapshot();
     return { ok: true, steps: progress.steps, currentUrl: state.currentUrl, message: progress.steps > 0 ? "ブラウザ操作を完了しました。" : "追加のブラウザ操作は不要でした。" };
@@ -137,9 +159,11 @@ export async function approveComputerUse(id: string) {
   const pending = store.takeApproval(id);
   if (!pending) throw new Error("APPROVAL_EXPIRED");
   if (store.snapshot().currentUrl !== pending.request.targetUrl) throw new Error("APPROVAL_EXPIRED");
-  await browserManager.execute(pending.action, crypto.randomUUID());
+  for (const action of pending.actions) {
+    await browserManager.execute(action, crypto.randomUUID());
+  }
   return controlledRun((signal) => runLoop(pending.goal, {
-    steps: pending.steps + 1,
+    steps: pending.steps + pending.actions.length,
     observations: pending.observations,
     previous: {
       responseId: pending.responseId,

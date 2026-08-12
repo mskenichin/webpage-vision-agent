@@ -1,11 +1,12 @@
 "use client";
 
 import {
-  ArrowLeft, Bot, ChevronRight, History, LoaderCircle, Mic, MicOff, PanelRight,
-  RefreshCw, Send, ShieldAlert, SlidersHorizontal, Sparkles, Square, Trash2, UserRound,
+  ArrowLeft, ArrowRight, Bot, ChevronRight, History, LoaderCircle, Mic, MicOff, PanelRight,
+  RefreshCw, ScrollText, Send, ShieldAlert, SlidersHorizontal, Sparkles, Square, Trash2, UserRound,
   Volume2, VolumeX, X,
 } from "lucide-react";
 import { FormEvent, useEffect, useRef, useState } from "react";
+import { displayPointToFrame, type FrameSize } from "@/lib/browser-frame";
 import type { AppState, BrowserAction, PageContext, Profile } from "@/lib/domain";
 import { realtimeInstructions } from "@/lib/realtime-instructions";
 
@@ -13,6 +14,19 @@ const statusLabels: Record<AppState["browserStatus"], string> = {
   starting: "ブラウザを起動中", ready: "接続済み", user_controlled: "手動操作中",
   agent_running: "AIが操作中", awaiting_approval: "承認待ち", recovering: "再接続中", failed: "接続エラー",
 };
+
+interface StreamFrame extends FrameSize {
+  data: string;
+  sequence: number;
+  revision: number;
+}
+
+function base64ImageUrl(data: string) {
+  const binary = window.atob(data);
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
+  return URL.createObjectURL(new Blob([bytes], { type: "image/jpeg" }));
+}
 
 async function jsonRequest<T>(url: string, init?: RequestInit): Promise<T> {
   const response = await fetch(url, init);
@@ -35,6 +49,7 @@ export default function Home() {
   const [transcribing, setTranscribing] = useState(false);
   const [voiceMode, setVoiceMode] = useState(false);
   const [voiceMuted, setVoiceMuted] = useState(false);
+  const [logsVisible, setLogsVisible] = useState(false);
   const [profileOpen, setProfileOpen] = useState(false);
   const [mobilePane, setMobilePane] = useState<"web" | "chat">("web");
   const [error, setError] = useState("");
@@ -49,7 +64,11 @@ export default function Home() {
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
   const browserFrameRevisionRef = useRef<number | null>(null);
   const pendingFrameRevisionRef = useRef<number | null>(null);
+  const browserFrameSizeRef = useRef<FrameSize>({ width: 1440, height: 900 });
+  const streamSequenceRef = useRef(0);
+  const presentedStreamSequenceRef = useRef(0);
   const browserFrameUrlRef = useRef("");
+  const retiredBrowserFrameUrlsRef = useRef(new Set<string>());
   const realtimeResponseActiveRef = useRef(false);
   const pendingRealtimeResponsesRef = useRef<Array<{ instructions?: string }>>([]);
   const stateRef = useRef<AppState | null>(null);
@@ -59,6 +78,7 @@ export default function Home() {
 
   useEffect(() => {
     let active = true;
+    const retiredBrowserFrameUrls = retiredBrowserFrameUrlsRef.current;
     void jsonRequest<AppState>("/api/session", { method: "POST" })
       .then((data) => { if (active) setState(data); })
       .catch((cause: Error) => { if (active) setError(cause.message); })
@@ -71,15 +91,26 @@ export default function Home() {
       speechAbortRef.current?.abort();
       speechAudioRef.current?.pause();
       if (speechUrlRef.current) URL.revokeObjectURL(speechUrlRef.current);
+      retiredBrowserFrameUrls.forEach((url) => URL.revokeObjectURL(url));
+      retiredBrowserFrameUrls.clear();
       if (browserFrameUrlRef.current) URL.revokeObjectURL(browserFrameUrlRef.current);
       microphoneRef.current?.getTracks().forEach((track) => track.stop());
     };
   }, []);
 
-  useEffect(() => {
-    const timer = window.setInterval(() => setFrame((value) => value + 1), 800);
-    return () => window.clearInterval(timer);
-  }, []);
+  function presentBrowserFrame(url: string) {
+    if (browserFrameUrlRef.current && browserFrameUrlRef.current !== url) {
+      retiredBrowserFrameUrlsRef.current.add(browserFrameUrlRef.current);
+    }
+    browserFrameUrlRef.current = url;
+    setBrowserFrameUrl(url);
+  }
+
+  function handleBrowserFrameLoad() {
+    browserFrameRevisionRef.current = pendingFrameRevisionRef.current;
+    retiredBrowserFrameUrlsRef.current.forEach((url) => URL.revokeObjectURL(url));
+    retiredBrowserFrameUrlsRef.current.clear();
+  }
 
   useEffect(() => {
     let active = true;
@@ -88,15 +119,16 @@ export default function Home() {
       .then(async (response) => {
         if (!response.ok) throw new Error("ブラウザ画面を同期できませんでした。");
         const revision = Number(response.headers.get("X-Browser-Frame-Revision"));
+        const width = Number(response.headers.get("X-Browser-Frame-Width"));
+        const height = Number(response.headers.get("X-Browser-Frame-Height"));
         const url = URL.createObjectURL(await response.blob());
         if (!active) {
           URL.revokeObjectURL(url);
           return;
         }
-        if (browserFrameUrlRef.current) URL.revokeObjectURL(browserFrameUrlRef.current);
-        browserFrameUrlRef.current = url;
         pendingFrameRevisionRef.current = Number.isSafeInteger(revision) ? revision : null;
-        setBrowserFrameUrl(url);
+        if (width > 0 && height > 0) browserFrameSizeRef.current = { width, height };
+        presentBrowserFrame(url);
         setBrowserBusy(false);
       })
       .catch((cause) => {
@@ -110,6 +142,70 @@ export default function Home() {
   }, [frame]);
 
   useEffect(() => {
+    let active = true;
+    const controller = new AbortController();
+    const decoder = new TextDecoder();
+
+    const applyFrame = async (streamFrame: StreamFrame) => {
+      if (!active || streamFrame.sequence <= streamSequenceRef.current) return;
+      streamSequenceRef.current = streamFrame.sequence;
+      const url = base64ImageUrl(streamFrame.data);
+      const image = new Image();
+      image.src = url;
+      try {
+        await image.decode();
+      } catch {
+        URL.revokeObjectURL(url);
+        return;
+      }
+      if (!active || streamFrame.sequence <= presentedStreamSequenceRef.current) {
+        URL.revokeObjectURL(url);
+        return;
+      }
+      presentedStreamSequenceRef.current = streamFrame.sequence;
+      browserFrameSizeRef.current = { width: streamFrame.width, height: streamFrame.height };
+      pendingFrameRevisionRef.current = streamFrame.revision;
+      presentBrowserFrame(url);
+      setBrowserBusy(false);
+    };
+
+    const connect = async () => {
+      let failures = 0;
+      while (active && !controller.signal.aborted) {
+        try {
+          const response = await fetch("/api/browser/stream", { cache: "no-store", signal: controller.signal });
+          if (!response.ok || !response.body) throw new Error("ブラウザ映像へ接続できませんでした。");
+          failures = 0;
+          const reader = response.body.getReader();
+          let buffer = "";
+          while (active) {
+            const { value, done } = await reader.read();
+            if (done) break;
+            buffer += decoder.decode(value, { stream: true });
+            const lines = buffer.split("\n");
+            buffer = lines.pop() ?? "";
+            for (const line of lines) {
+              if (!line) continue;
+              void applyFrame(JSON.parse(line) as StreamFrame);
+            }
+          }
+        } catch (cause) {
+          if (cause instanceof DOMException && cause.name === "AbortError") return;
+          failures += 1;
+          if (failures >= 3) setFrame((value) => value + 1);
+        }
+        if (active) await new Promise((resolve) => window.setTimeout(resolve, Math.min(4_000, 500 * 2 ** failures)));
+      }
+    };
+
+    void connect();
+    return () => {
+      active = false;
+      controller.abort();
+    };
+  }, []);
+
+  useEffect(() => {
     const timer = window.setInterval(() => {
       void jsonRequest<AppState>("/api/session").then(setState).catch(() => undefined);
     }, 800);
@@ -118,7 +214,7 @@ export default function Home() {
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [state?.messages.length, sending]);
+  }, [state?.messages.length, state?.processLogs.length, sending]);
 
   useEffect(() => {
     stateRef.current = state;
@@ -173,6 +269,7 @@ export default function Home() {
     setBrowserBusy(true);
     setError("");
     try {
+      const frameDependent = action.type === "click" || action.type === "double_click";
       await jsonRequest("/api/browser", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -180,7 +277,7 @@ export default function Home() {
           ...action,
           actor: "user",
           operationId: crypto.randomUUID(),
-          expectedFrameRevision: browserFrameRevisionRef.current ?? undefined,
+          expectedFrameRevision: frameDependent ? browserFrameRevisionRef.current ?? undefined : undefined,
         }),
       });
       setFrame((value) => value + 1);
@@ -192,21 +289,33 @@ export default function Home() {
     }
   }
 
+  function submitAddress(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const input = event.currentTarget.elements.namedItem("url");
+    if (!(input instanceof HTMLInputElement)) return;
+    const value = input.value.trim();
+    if (!value || browserBusy) return;
+    const url = value.startsWith("/")
+      ? new URL(value, "https://lexus.jp/").toString()
+      : /^https?:\/\//i.test(value) ? value : `https://${value}`;
+    input.value = url;
+    void browserAction({ type: "navigate", url });
+  }
+
   function handleBrowserClick(event: React.MouseEvent<HTMLImageElement>) {
     if (browserBusy) return;
     const rect = event.currentTarget.getBoundingClientRect();
-    const scale = Math.min(rect.width / 1440, rect.height / 900);
-    const contentWidth = 1440 * scale;
-    const contentHeight = 900 * scale;
-    const offsetX = (rect.width - contentWidth) / 2;
-    const offsetY = (rect.height - contentHeight) / 2;
-    const x = event.clientX - rect.left - offsetX;
-    const y = event.clientY - rect.top - offsetY;
-    if (x < 0 || y < 0 || x > contentWidth || y > contentHeight) return;
+    const point = displayPointToFrame(event.clientX, event.clientY, {
+      left: rect.left,
+      top: rect.top,
+      width: rect.width,
+      height: rect.height,
+    }, browserFrameSizeRef.current);
+    if (!point) return;
     void browserAction({
       type: "click",
-      x: x / scale,
-      y: y / scale,
+      x: point.x,
+      y: point.y,
     });
   }
 
@@ -321,12 +430,10 @@ export default function Home() {
     const image = new Image();
     image.src = url;
     await image.decode().catch(() => undefined);
-    if (browserFrameUrlRef.current) URL.revokeObjectURL(browserFrameUrlRef.current);
-    browserFrameUrlRef.current = url;
     const nextRevision = Number.isSafeInteger(revision) ? revision : null;
     pendingFrameRevisionRef.current = nextRevision;
     browserFrameRevisionRef.current = nextRevision;
-    setBrowserFrameUrl(url);
+    presentBrowserFrame(url);
   }
 
   async function completeRealtimeUserTurn(transcript: string) {
@@ -344,7 +451,9 @@ export default function Home() {
       await synchronizeBrowserFrame();
       setSending(true);
       const instructions = browserTask
-        ? `サーバーでブラウザ操作が完了しました。現在URLは ${browserTask.currentUrl} です。toolを再度呼び出さず、${browserTask.message}と簡潔に日本語で伝えてください。読み込み中とは言わないでください。`
+        ? browserTask.ok
+          ? `サーバーでブラウザ操作が完了しました。現在URLは ${browserTask.currentUrl} です。toolを再度呼び出さず、${browserTask.message}と簡潔に日本語で伝えてください。読み込み中とは言わないでください。`
+          : `サーバーでブラウザ操作を試みましたが完了できませんでした。toolを再度呼び出さず、${browserTask.message}と簡潔に日本語で伝えてください。操作済みとは言わないでください。`
         : undefined;
       requestRealtimeResponse(instructions);
     } catch (cause) {
@@ -589,7 +698,24 @@ export default function Home() {
               <button className="icon-button compact" title="戻る" onClick={() => void browserAction({ type: "back" })}><ArrowLeft size={17} /></button>
               <button className="icon-button compact" title="再読み込み" onClick={() => void browserAction({ type: "reload" })}><RefreshCw size={16} /></button>
             </div>
-            <div className="address-bar" title={state?.currentUrl}><span className="secure-dot" /><span>{state?.currentUrl ?? "https://lexus.jp/"}</span></div>
+            <form className="address-bar" onSubmit={submitAddress} title="Lexus公式サイト内のURLを入力">
+              <span className="secure-dot" />
+              <input
+                key={state?.currentUrl}
+                name="url"
+                aria-label="Lexus公式サイトのURL"
+                defaultValue={state?.currentUrl ?? "https://lexus.jp/"}
+                disabled={browserBusy}
+                spellCheck={false}
+                onKeyDown={(event) => {
+                  if (event.key === "Escape") {
+                    event.currentTarget.value = state?.currentUrl ?? "https://lexus.jp/";
+                    event.currentTarget.blur();
+                  }
+                }}
+              />
+              <button type="submit" title="入力したURLへ移動" aria-label="入力したURLへ移動" disabled={browserBusy}><ArrowRight size={15} /></button>
+            </form>
             <div className="browser-status"><span className={`status-light status-${state?.browserStatus ?? "starting"}`} />{state ? statusLabels[state.browserStatus] : "接続中"}</div>
           </div>
 
@@ -597,7 +723,7 @@ export default function Home() {
             {(browserBusy || !state) && <div className="browser-loader"><LoaderCircle size={26} className="spin" /><span>{state?.browserStatus === "agent_running" ? "AIがページを操作しています" : "ブラウザを同期しています"}</span></div>}
             {state?.browserStatus !== "failed" && browserFrameUrl && (
               // eslint-disable-next-line @next/next/no-img-element
-              <img src={browserFrameUrl} alt="Lexus公式サイトのライブブラウザ画面" draggable={false} onClick={handleBrowserClick} onLoad={() => { browserFrameRevisionRef.current = pendingFrameRevisionRef.current; }} />
+              <img src={browserFrameUrl} alt="Lexus公式サイトのライブブラウザ画面" draggable={false} onClick={handleBrowserClick} onLoad={handleBrowserFrameLoad} />
             )}
             {state?.browserStatus === "failed" && <div className="browser-empty"><PanelRight size={28} /><strong>ブラウザを開始できませんでした</strong><button onClick={() => window.location.reload()}>再試行</button></div>}
           </div>
@@ -609,6 +735,7 @@ export default function Home() {
           <div className="chat-heading">
             <div><span className="eyebrow">AI CONCIERGE</span><h2>ご希望を伺います</h2></div>
             <div className="chat-heading-actions">
+              <button className={`icon-button compact ${logsVisible ? "is-active" : ""}`} title={logsVisible ? "処理ログを非表示" : "処理ログを表示"} aria-label={logsVisible ? "処理ログを非表示" : "処理ログを表示"} aria-pressed={logsVisible} onClick={() => setLogsVisible((value) => !value)}><ScrollText size={17} /></button>
               <button className="icon-button compact" title="チャットをクリア" aria-label="チャットをクリア" disabled={sending || !state?.messages.length} onClick={() => void clearChat()}><Trash2 size={17} /></button>
               <button className="icon-button compact" title={voiceMuted ? "読み上げを有効化" : "読み上げをミュート"} onClick={() => { stopSpeech(); setVoiceMuted((value) => { const next = !value; if (realtimeAudioRef.current) realtimeAudioRef.current.muted = next; return next; }); }}>{voiceMuted ? <VolumeX size={17} /> : <Volume2 size={17} />}</button>
             </div>
@@ -617,6 +744,19 @@ export default function Home() {
           {state && state.interests.length > 0 && <button className="interest-summary" onClick={() => setProfileOpen(true)}><Sparkles size={15} /><span>{state.interests.slice(0, 3).map((interest) => interest.name).join(" · ")}</span><ChevronRight size={15} /></button>}
 
           <div className="messages" aria-live="polite">
+            {logsVisible && <section className="process-log-panel" aria-label="処理ログ">
+              <header><div><ScrollText size={15} /><strong>処理ログ</strong></div><span>{state?.processLogs.length ?? 0}件</span></header>
+              <div className="process-log-list">
+                {(state?.processLogs.length ?? 0) === 0 && <p>処理を開始すると、モデル応答やブラウザ操作がここに表示されます。</p>}
+                {[...(state?.processLogs ?? [])].reverse().map((log) => (
+                  <article className={`process-log process-log-${log.level}`} key={log.id}>
+                    <div><time dateTime={log.createdAt}>{new Date(log.createdAt).toLocaleTimeString("ja-JP", { hour: "2-digit", minute: "2-digit", second: "2-digit" })}</time><span>{log.source}</span></div>
+                    <strong>{log.message}</strong>
+                    {log.detail && <p>{log.detail}</p>}
+                  </article>
+                ))}
+              </div>
+            </section>}
             {state?.messages.length === 0 && <p className="chat-empty">新しいメッセージを入力して会話を始められます。</p>}
             {state?.messages.map((item) => (
               <article className={`message message-${item.role}`} key={item.id}>

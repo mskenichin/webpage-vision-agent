@@ -17,18 +17,23 @@ const toolSchema = z.discriminatedUnion("name", [
 export async function POST(request: Request) {
   const parsed = toolSchema.safeParse(await request.json().catch(() => null));
   if (!parsed.success) return NextResponse.json({ code: "INVALID_TOOL_CALL", issues: parsed.error.issues }, { status: 400 });
+  const toolName = parsed.data.name === "delegate_complex_query" ? "専門モデルへの委譲" : "ブラウザ操作";
+  store.addProcessLog("realtime", "info", `${toolName}を開始しました`);
   try {
     if (parsed.data.name === "delegate_complex_query") {
       const state = store.snapshot();
       const pageContext = await browserManager.pageContext(parsed.data.arguments.query, true);
       const result = await delegateComplexQuery(parsed.data.arguments.query, state.profile, state.messages, pageContext.url, state.interests, pageContext);
+      store.addProcessLog("realtime", "success", `${toolName}が完了しました (${result.model})`, result.text);
       return NextResponse.json(result);
     }
     const result = await runBrowserTask(parsed.data.arguments.goal);
     const pageContext = await browserManager.pageContext(parsed.data.arguments.goal, true);
+    store.addProcessLog("realtime", "success", `${toolName}が完了しました`, result.message);
     return NextResponse.json({ ...result, pageContext });
   } catch (error) {
     console.error("Realtime tool failed", error);
+    store.addProcessLog("realtime", "error", `${toolName}を完了できませんでした`);
     return NextResponse.json({ code: "TOOL_UNAVAILABLE", message: "要求された処理を完了できませんでした。" }, { status: 502 });
   }
 }

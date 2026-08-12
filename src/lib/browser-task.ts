@@ -11,6 +11,13 @@ const spokenModelNames: Array<[RegExp, VehicleModel]> = [
   [/イーエス/g, "ES"], [/アイエス/g, "IS"], [/エルシー/g, "LC"], [/アールシー/g, "RC"],
 ];
 
+const onPageAction = /にして|変更|変え|選ん|選択|クリック|押して|切り替|したい|進みたい|始めたい|やりたい/i;
+const onPageTarget = /色|カラー|スウォッチ|オプション|グレード|パッケージ|タブ|ボタン|チェック|選択肢|見積|シミュレーション|試乗|予約|問い合わせ/i;
+
+function requestsOnPageAction(prompt: string) {
+  return onPageAction.test(prompt) && onPageTarget.test(prompt);
+}
+
 function normalizeSpokenModelNames(prompt: string) {
   return spokenModelNames.reduce((normalized, [pattern, model]) => normalized.replace(pattern, model), prompt);
 }
@@ -39,6 +46,8 @@ export function vehicleModelUrl(model: VehicleModel) {
 }
 
 export function browserTaskRequest(prompt: string, currentUrl?: string) {
+  if (requestsOnPageAction(prompt)) return null;
+
   const explicitModel = vehicleModelRequest(prompt);
   const knownModelSection = /パッケージ|グレード|価格|内装|インテリア|外装|エクステリア|デザイン|安全|セーフティ|走行|走り|ドライビング/i.test(prompt);
   const currentModel = modelFromUrl(currentUrl);
@@ -61,12 +70,16 @@ export function browserTaskRequest(prompt: string, currentUrl?: string) {
   return { model, targetUrl };
 }
 
+export function requiresBrowserTask(prompt: string, currentUrl?: string) {
+  if (browserTaskRequest(prompt, currentUrl)) return true;
+  const directNavigation = /見せ|開い|表示|探し|検索|ページ|サイト|モデル一覧|車種一覧|スクロール|戻って|進んで|再読み込み/i;
+  return directNavigation.test(prompt) || requestsOnPageAction(prompt);
+}
+
 export async function runBrowserTask(goal: string) {
   const request = browserTaskRequest(goal, store.snapshot().currentUrl);
   if (!request) {
-    const result = await runComputerUse(goal);
-    if (result.ok) await browserManager.revealRelevantContent(goal);
-    return result;
+    return runComputerUse(goal);
   }
 
   const { model, targetUrl } = request;

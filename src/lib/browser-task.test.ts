@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { browserTaskRequest, vehicleModelRequest, vehicleModelUrl } from "./browser-task";
+import { browserTaskRequest, requiresBrowserTask, vehicleModelRequest, vehicleModelUrl } from "./browser-task";
 
 describe("vehicleModelRequest", () => {
   it("recognizes an explicit Japanese model-page request", () => {
@@ -53,5 +53,25 @@ describe("vehicleModelRequest", () => {
       model: "NX",
       targetUrl: "https://lexus.jp/models/nx/features/interior/",
     });
+  });
+
+  it("recognizes an on-page color change as a browser task", () => {
+    const configuratorUrl = "https://lexus.jp/request/estimate_sim/option?car_name_en=IS300h";
+    expect(requiresBrowserTask("Fスポーツの色を赤にして。", configuratorUrl)).toBe(true);
+    expect(requiresBrowserTask("右端の青いカラースウォッチを選んで", configuratorUrl)).toBe(true);
+    expect(requiresBrowserTask("赤い車が好きです", configuratorUrl)).toBe(false);
+  });
+
+  it("delegates model-specific UI changes to Computer Use", () => {
+    const exteriorUrl = "https://lexus.jp/models/is/features/exterior/";
+    expect(browserTaskRequest("ISのボディカラーを赤系の色に変更して。", exteriorUrl)).toBeNull();
+    expect(browserTaskRequest("ISのF SPORTパッケージを選択して。", exteriorUrl)).toBeNull();
+    expect(requiresBrowserTask("ISのボディカラーを赤系の色に変更して。", exteriorUrl)).toBe(true);
+  });
+
+  it("delegates requests to start a visible simulator to Computer Use", () => {
+    const packageUrl = "https://lexus.jp/models/is/features/price_package/";
+    expect(browserTaskRequest("見積もりシミュレーションをしたいです。", packageUrl)).toBeNull();
+    expect(requiresBrowserTask("見積もりシミュレーションをしたいです。", packageUrl)).toBe(true);
   });
 });

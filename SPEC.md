@@ -106,9 +106,10 @@
 
 - セッション開始時に `https://lexus.jp/` を開く。
 - 通常の外部サイトiframe埋め込みには依存せず、隔離ブラウザの画面を低遅延で配信する。
+- 左ペイン、ユーザー入力、computer-useモデルの画面観測は、同一の隔離Chromium Pageを共有する。左ペインにはCDP screencastをストリーミング配信し、静止画取得APIは初期表示、再同期、障害時fallbackに使用する。
 - ユーザーのポインター、クリック、スクロール、キーボード入力を隔離ブラウザへ転送する。
 - AI操作中も画面更新を表示し、現在の操作を短い状態文で示す。
-- 現在URL、戻る、進む、再読み込み、AI操作停止を提供する。任意URL入力欄は提供しない。
+- 現在URL、戻る、進む、再読み込み、AI操作停止を提供する。URL欄はLexus公式サイトの許可ドメイン内に限って編集・遷移でき、許可外URLへの入力はサーバー側で拒否する。
 - 状態は少なくとも `starting`、`ready`、`user_controlled`、`agent_running`、`awaiting_approval`、`recovering`、`failed` を持つ。
 - AIとユーザーが同時に入力しないよう、ユーザーが手動操作を始めた時点でagent runを一時停止する。
 - CAPTCHA、ログイン、Cookie同意など、人による判断が必要な画面ではAI操作を停止してユーザーへ制御を返す。
@@ -271,7 +272,7 @@ flowchart LR
     API --> PROFILE[(プロファイルDB)]
     API --> AUDIT[(セッション・監査ストア)]
     ORCH <-->|画面・操作| BS
-    ORCH <-->|computer-use API| CU[computer-use-preview]
+    ORCH <-->|Responses API computer tool| CU[computer対応モデル]
     ORCH <-->|複雑な質問| EXPERT[gpt-5.6-sol]
     API -->|短命client secret| FE
     FE <-->|WebRTC音声・イベント| RT[gpt-realtime-2.1-mini]
@@ -293,6 +294,7 @@ flowchart LR
 | Microsoft Foundry | Realtime、専門推論、computer-useモデルのホスティング。 |
 
 隔離ブラウザとモデルが扱うbrowser sessionは常に同一でなければならない。映像表示専用の別ブラウザを用意してはならない。
+CDP screencastの配信経路ではHTTPレスポンスのバッファリングを無効化する。リバースプロキシまたはロードバランサーを配置する場合も、当該ストリームを逐次転送するよう構成する。
 
 ## 8. 概念API
 

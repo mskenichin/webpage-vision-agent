@@ -38,6 +38,7 @@ describe("page context", () => {
 
     expect(instructions).toContain("実際に見えている内容");
     expect(instructions).toContain("この範囲に書かれている事実だけ");
+    expect(instructions).toContain("表示されていない・存在しないと回答してはいけません");
     expect(instructions).toContain("推測や一般知識で回答せず");
   });
 });

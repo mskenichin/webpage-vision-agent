@@ -58,6 +58,15 @@ export interface ChatMessage {
   createdAt: string;
 }
 
+export interface ProcessLog {
+  id: string;
+  source: "agent" | "browser" | "realtime" | "system";
+  level: "info" | "success" | "error";
+  message: string;
+  detail?: string;
+  createdAt: string;
+}
+
 export interface ApprovalRequest {
   id: string;
   operation: string;
@@ -74,12 +83,13 @@ export interface AppState {
   interests: Interest[];
   activity: ActivityEvent[];
   messages: ChatMessage[];
+  processLogs: ProcessLog[];
   approval: ApprovalRequest | null;
   agentMode: "foundry" | "demo";
 }
 
 export interface BrowserAction {
-  type: "click" | "scroll" | "type" | "key" | "back" | "reload" | "navigate";
+  type: "click" | "double_click" | "scroll" | "type" | "key" | "wait" | "back" | "reload" | "navigate";
   x?: number;
   y?: number;
   deltaY?: number;

@@ -7,7 +7,7 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 const actionSchema = z.object({
-  type: z.enum(["click", "scroll", "type", "key", "back", "reload", "navigate"]),
+  type: z.enum(["click", "double_click", "scroll", "type", "key", "wait", "back", "reload", "navigate"]),
   x: z.number().min(0).max(1440).optional(),
   y: z.number().min(0).max(900).optional(),
   deltaY: z.number().min(-3000).max(3000).optional(),
@@ -28,6 +28,8 @@ export async function GET() {
         "Cache-Control": "no-store, max-age=0",
         "X-Content-Type-Options": "nosniff",
         "X-Browser-Frame-Revision": String(frame.revision),
+        "X-Browser-Frame-Width": "1440",
+        "X-Browser-Frame-Height": "900",
       },
     });
   } catch (error) {
@@ -52,10 +54,13 @@ export async function POST(request: Request) {
   } catch (error) {
     const message = error instanceof Error ? error.message : "操作できませんでした。";
     const frameStale = message.includes("BROWSER_FRAME_STALE");
+    const domainNotAllowed = message.includes("DOMAIN_NOT_ALLOWED");
     return NextResponse.json(
       {
-        code: frameStale ? "BROWSER_FRAME_STALE" : message.includes("DOMAIN_NOT_ALLOWED") ? "DOMAIN_NOT_ALLOWED" : "BROWSER_ACTION_FAILED",
-        message: frameStale ? "画面が更新されました。最新の画面でもう一度操作してください。" : message,
+        code: frameStale ? "BROWSER_FRAME_STALE" : domainNotAllowed ? "DOMAIN_NOT_ALLOWED" : "BROWSER_ACTION_FAILED",
+        message: frameStale
+          ? "画面が更新されました。最新の画面でもう一度操作してください。"
+          : domainNotAllowed ? "Lexus公式サイト内のURLを入力してください。" : message,
       },
       { status: 409 },
     );
