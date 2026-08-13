@@ -2,6 +2,8 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 import { browserManager } from "@/lib/browser";
 import { stopComputerUse } from "@/lib/computer-use";
+import { store } from "@/lib/store";
+import { cancelTaskMode } from "@/lib/task-mode";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -48,7 +50,15 @@ export async function POST(request: Request) {
 
   const { operationId, expectedFrameRevision, ...action } = parsed.data;
   try {
-    if (action.actor === "user") stopComputerUse();
+    if (action.actor === "user") {
+      const taskWasActive = store.snapshot().browserStatus === "agent_running"
+        || store.snapshot().browserStatus === "awaiting_approval";
+      cancelTaskMode();
+      stopComputerUse();
+      if (taskWasActive) {
+        store.addMessage("system", "手動操作に切り替えたため、実行中のタスクを停止しました。");
+      }
+    }
     await browserManager.execute(action, operationId, expectedFrameRevision);
     return NextResponse.json({ ok: true });
   } catch (error) {

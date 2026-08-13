@@ -23,8 +23,28 @@ export function isAllowedUrl(value: string) {
   }
 }
 
+export function isWebNavigationUrl(value: string) {
+  try {
+    return ["http:", "https:"].includes(new URL(value).protocol);
+  } catch {
+    return false;
+  }
+}
+
 export function requiresRiskInspection(action: BrowserAction) {
   return action.type === "click" || action.type === "double_click" || action.type === "type" || (action.type === "key" && action.key === "Enter");
+}
+
+export function actionRisk(label: string, inputType = "") {
+  const sensitive = /送信|確定|完了|購入|契約|申し込|申込|ログイン|アカウント作成|同意|アップロード|ダウンロード/i;
+  const personal = /氏名|名前|住所|メール|電話|郵便|生年月日|認証コード/i;
+  if (personal.test(label) || ["email", "tel", "password", "file"].includes(inputType)) {
+    return "個人情報またはファイルを入力・送信する可能性があります。";
+  }
+  if (sensitive.test(label)) {
+    return "問い合わせ、予約、ログイン、同意、購入など外部へ影響する操作の可能性があります。";
+  }
+  return null;
 }
 
 export function revealQueryText(query: string) {
@@ -120,14 +140,15 @@ class BrowserManager {
       if (!this.page) throw new Error("Browser session is not available");
       let image: Buffer;
       try {
-        image = await this.page.screenshot({ type: "jpeg", quality: 72, animations: "disabled" });
+        image = await this.page.screenshot({ type: "jpeg", quality: 72, animations: "disabled", timeout: 10_000 });
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
-        if (!/Target (?:page, context or browser has been closed|crashed)/i.test(message)) throw error;
+        if (!/Timeout|Target (?:page, context or browser has been closed|crashed)/i.test(message)) throw error;
+        store.setBrowser("recovering");
         await this.close();
         await this.start();
         if (!this.page) throw new Error("Browser session is not available");
-        image = await this.page.screenshot({ type: "jpeg", quality: 72, animations: "disabled" });
+        image = await this.page.screenshot({ type: "jpeg", quality: 72, animations: "disabled", timeout: 10_000 });
       }
       return { image, revision: this.frameRevision };
     });
@@ -289,30 +310,21 @@ class BrowserManager {
     await this.start();
     if (!this.page || action.actor !== "agent") return null;
     if (!requiresRiskInspection(action)) return null;
-    return this.page.evaluate(({ type, x, y }) => {
-      const sensitive = /送信|確定|完了|購入|契約|申し込|申込|ログイン|アカウント作成|同意|アップロード|ダウンロード/i;
-      const personal = /氏名|名前|住所|メール|電話|郵便|生年月日|認証コード/i;
+    const target = await this.page.evaluate(({ type, x, y }) => {
       const target = type === "click" ? document.elementFromPoint(x ?? 0, y ?? 0) : document.activeElement;
       if (!(target instanceof Element)) return null;
       const control = target.closest("button, a, input, select, textarea, [role=button]") ?? target;
-      const form = control.closest("form");
       const label = [
         control.textContent,
         control.getAttribute("aria-label"),
         control.getAttribute("title"),
         control.getAttribute("name"),
         control.getAttribute("placeholder"),
-        form?.textContent,
       ].filter(Boolean).join(" ").replace(/\s+/g, " ").slice(0, 500);
       const inputType = control instanceof HTMLInputElement ? control.type : "";
-      if (personal.test(label) || ["email", "tel", "password", "file"].includes(inputType)) {
-        return "個人情報またはファイルを入力・送信する可能性があります。";
-      }
-      if (sensitive.test(label) || inputType === "submit") {
-        return "問い合わせ、予約、ログイン、同意、購入など外部へ影響する操作の可能性があります。";
-      }
-      return null;
+      return { label, inputType };
     }, { type: action.type, x: action.x, y: action.y });
+    return target ? actionRisk(target.label, target.inputType) : null;
   }
 
   async execute(action: BrowserAction, operationId = crypto.randomUUID(), expectedFrameRevision?: number) {
@@ -385,7 +397,7 @@ class BrowserManager {
     }, { clickX: x, clickY: y });
 
     const link = target.link;
-    if (link && !isAllowedUrl(link.url)) throw new Error("DOMAIN_NOT_ALLOWED");
+    if (link && isWebNavigationUrl(link.url) && !isAllowedUrl(link.url)) throw new Error("DOMAIN_NOT_ALLOWED");
     store.addProcessLog("browser", "info", "ブラウザ上の要素をクリックしました", target.label ? `${target.tag}: ${target.label}` : target.tag);
     const sourceUrl = this.page.url();
     await this.page.mouse.click(x, y);

@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 import { approveComputerUse, rejectComputerUse } from "@/lib/computer-use";
 import { store } from "@/lib/store";
+import { cancelTaskMode, resumeTaskModeAfterApproval } from "@/lib/task-mode";
 
 export const runtime = "nodejs";
 export const maxDuration = 120;
@@ -11,14 +12,32 @@ const approvalSchema = z.object({
   decision: z.enum(["approve", "reject"]),
 });
 
+function resultFlag(result: unknown, key: "awaitingApproval" | "continuationRequired") {
+  return typeof result === "object" && result !== null && key in result
+    && (result as Record<string, unknown>)[key] === true;
+}
+
+function resultMessage(result: unknown) {
+  if (typeof result !== "object" || result === null || !("message" in result)) return "";
+  const message = (result as Record<string, unknown>).message;
+  return typeof message === "string" ? message : "";
+}
+
 export async function POST(request: Request) {
   const parsed = approvalSchema.safeParse(await request.json().catch(() => null));
   if (!parsed.success) return NextResponse.json({ code: "INVALID_APPROVAL" }, { status: 400 });
   try {
     const result = parsed.data.decision === "approve"
-      ? await approveComputerUse(parsed.data.id)
+      ? await resumeTaskModeAfterApproval(await approveComputerUse(parsed.data.id))
       : rejectComputerUse(parsed.data.id);
-    return NextResponse.json({ result, state: store.snapshot() });
+    if (parsed.data.decision === "reject") cancelTaskMode();
+    const awaitingApproval = resultFlag(result, "awaitingApproval");
+    const taskContinuation = resultFlag(result, "continuationRequired");
+    const message = resultMessage(result);
+    if (parsed.data.decision === "approve" && !awaitingApproval && !taskContinuation && message) {
+      store.addMessage("assistant", message);
+    }
+    return NextResponse.json({ result, state: store.snapshot(), taskContinuation });
   } catch (error) {
     const code = error instanceof Error && error.message === "APPROVAL_EXPIRED" ? "APPROVAL_EXPIRED" : "AGENT_FAILED";
     return NextResponse.json({ code, message: code === "APPROVAL_EXPIRED" ? "承認要求の有効期限が切れました。" : "操作を再開できませんでした。" }, { status: code === "APPROVAL_EXPIRED" ? 409 : 502 });

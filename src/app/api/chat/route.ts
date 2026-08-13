@@ -1,22 +1,27 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
-import { runAgent } from "@/lib/agent";
+import { runAgent, TASK_CONTINUATION_MESSAGE } from "@/lib/agent";
 import { store } from "@/lib/store";
 
 export const runtime = "nodejs";
 export const maxDuration = 120;
 
-const messageSchema = z.object({ message: z.string().trim().min(1).max(4000) });
+const messageSchema = z.object({
+  message: z.string().trim().min(1).max(4000),
+  mode: z.enum(["normal", "task"]).default("normal"),
+  continuation: z.boolean().default(false),
+});
 
 export async function POST(request: Request) {
   const parsed = messageSchema.safeParse(await request.json().catch(() => null));
   if (!parsed.success) return NextResponse.json({ code: "INVALID_MESSAGE" }, { status: 400 });
 
-  store.addMessage("user", parsed.data.message);
+  if (!parsed.data.continuation) store.addMessage("user", parsed.data.message);
   try {
-    const content = await runAgent(parsed.data.message);
-    store.addMessage("assistant", content);
-    return NextResponse.json(store.snapshot());
+    const content = await runAgent(parsed.data.message, parsed.data.mode);
+    const taskContinuation = content === TASK_CONTINUATION_MESSAGE;
+    if (!taskContinuation) store.addMessage("assistant", content);
+    return NextResponse.json({ ...store.snapshot(), taskContinuation });
   } catch (error) {
     store.setBrowser("ready");
     const message = error instanceof Error ? error.message : "操作を完了できませんでした。";

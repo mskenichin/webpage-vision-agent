@@ -1,5 +1,7 @@
 export type Actor = "user" | "agent";
 
+export type ExecutionMode = "normal" | "task";
+
 export type BrowserStatus =
   | "starting"
   | "ready"

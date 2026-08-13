@@ -5,6 +5,10 @@ import { runComputerUse } from "./computer-use";
 import { delegateComplexQuery } from "./delegation";
 import { requestFoundryResponse } from "./foundry";
 import { store } from "./store";
+import { runTaskMode } from "./task-mode";
+import type { ExecutionMode } from "./domain";
+
+export const TASK_CONTINUATION_MESSAGE = "TASK_CONTINUATION_REQUIRED";
 
 function demoAction(prompt: string): BrowserAction | null {
   const normalized = prompt.toUpperCase();
@@ -25,8 +29,8 @@ function profileContext() {
   return "ご希望に合う情報をLexus公式サイトで探します。";
 }
 
-export async function runAgent(prompt: string) {
-  store.addProcessLog("agent", "info", "テキスト要求の処理を開始しました");
+export async function runAgent(prompt: string, executionMode: ExecutionMode = "normal") {
+  store.addProcessLog("agent", "info", `テキスト要求の処理を開始しました (${executionMode === "task" ? "タスクモード" : "通常モード"})`);
   store.setBrowser("agent_running");
   const state = store.snapshot();
   let action: BrowserAction | null = null;
@@ -34,20 +38,33 @@ export async function runAgent(prompt: string) {
   const explicitModel = browserTaskRequest(prompt, state.currentUrl);
   const browserIntent = requiresBrowserTask(prompt, state.currentUrl);
 
-  if (browserIntent && explicitModel) {
+  if (executionMode === "task" && browserIntent) {
+    store.addProcessLog("agent", "info", "タスクモードで要求を分解しています");
+    const result = await runTaskMode(prompt);
+    usedFoundry = result.steps > 0;
+    action = { type: "navigate", url: store.snapshot().currentUrl, actor: "agent" };
+    if ("awaitingApproval" in result && result.awaitingApproval) {
+      return "タスクを続けるには、画面に表示された内容を確認して承認または拒否してください。";
+    }
+    if ("continuationRequired" in result && result.continuationRequired) return TASK_CONTINUATION_MESSAGE;
+    return result.message ?? "タスクの全条件を画面上で確認しました。";
+  }
+
+  if (executionMode === "normal" && browserIntent && explicitModel) {
     store.addProcessLog("browser", "info", "関連ページを探索しています", explicitModel.targetUrl);
     await runBrowserTask(prompt);
     action = { type: "navigate", url: store.snapshot().currentUrl, actor: "agent" };
     store.addProcessLog("browser", "success", "関連ページを表示しました", store.snapshot().currentUrl);
   }
 
-  if (state.agentMode === "foundry" && browserIntent && !action) {
+  if (executionMode === "normal" && state.agentMode === "foundry" && browserIntent && !action) {
     try {
       store.addProcessLog("browser", "info", "Computer Useを開始しました");
       const result = await runComputerUse(prompt);
       usedFoundry = result.steps > 0;
       store.addProcessLog("browser", "success", "Computer Useが完了しました", `${result.steps}ステップ実行`);
       if (result.awaitingApproval) return "操作を続けるには、画面に表示された内容を確認して承認または拒否してください。";
+      if (result.continuationRequired) return TASK_CONTINUATION_MESSAGE;
     } catch (error) {
       if (error instanceof Error && ["AGENT_STOPPED", "AGENT_TIMEOUT"].includes(error.message)) throw error;
       store.addProcessLog("browser", "error", "Computer Useを完了できませんでした");

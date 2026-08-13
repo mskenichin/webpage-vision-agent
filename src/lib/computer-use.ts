@@ -4,8 +4,13 @@ import { requestFoundryComputerStep, type ComputerStep } from "./foundry";
 import { store, type PendingApproval } from "./store";
 
 const MAX_STEPS = 20;
-const RUN_TIMEOUT_MS = 120_000;
+const MAX_OBSERVATIONS = 20;
+const RUN_TIMEOUT_MS = 75_000;
 let activeRun: AbortController | null = null;
+
+export function computerActionsWithinLimit(actions: BrowserAction[], completedSteps: number, maxSteps = MAX_STEPS) {
+  return actions.slice(0, Math.max(0, maxSteps - completedSteps));
+}
 
 function actionKey(action: BrowserAction | null) {
   return action ? JSON.stringify({ type: action.type, x: action.x, y: action.y, deltaY: action.deltaY, text: action.text, key: action.key, url: action.url }) : "done";
@@ -65,7 +70,7 @@ async function runLoop(goal: string, progress: RunProgress, signal: AbortSignal)
   store.setBrowser("agent_running");
 
   try {
-    while (progress.steps + progress.observations < MAX_STEPS) {
+    while (progress.steps < MAX_STEPS && progress.observations < MAX_OBSERVATIONS) {
       if (signal.aborted) throw new Error("AGENT_STOPPED");
       const state = store.snapshot();
       const result = await requestFoundryComputerStep(
@@ -79,6 +84,15 @@ async function runLoop(goal: string, progress: RunProgress, signal: AbortSignal)
       );
       if (result.completed) {
         const completedState = store.snapshot();
+        if (!result.goalAchieved) {
+          return {
+            ok: false,
+            conditionUnmet: true,
+            steps: progress.steps,
+            currentUrl: completedState.currentUrl,
+            message: result.message ?? "画面上で成功条件を確認できませんでした。",
+          };
+        }
         return {
           ok: true,
           steps: progress.steps,
@@ -110,15 +124,22 @@ async function runLoop(goal: string, progress: RunProgress, signal: AbortSignal)
       const repetitions = (seen.get(key) ?? 0) + 1;
       seen.set(key, repetitions);
       if (repetitions >= 3) throw new Error("COMPUTER_USE_REPEATED_ACTION");
-      if (progress.steps + result.actions.length > MAX_STEPS) throw new Error("COMPUTER_USE_MAX_STEPS");
-      for (const action of result.actions) {
+      const remainingActions = computerActionsWithinLimit(result.actions, progress.steps);
+      for (const action of remainingActions) {
         store.addProcessLog("browser", "info", `Computer Useステップ ${progress.steps + 1}`, actionDescription(action));
         await browserManager.execute(action, crypto.randomUUID());
         progress.steps += 1;
       }
+      if (remainingActions.length < result.actions.length) break;
     }
     const state = store.snapshot();
-    return { ok: true, steps: progress.steps, currentUrl: state.currentUrl, message: progress.steps > 0 ? "ブラウザ操作を完了しました。" : "追加のブラウザ操作は不要でした。" };
+    return {
+      ok: false,
+      continuationRequired: true,
+      steps: progress.steps,
+      currentUrl: state.currentUrl,
+      message: "操作上限ごとに画面状態を保存し、次の実行へ継続します。",
+    };
   } catch (error) {
     if (signal.aborted) {
       throw signal.reason instanceof Error ? signal.reason : new Error("AGENT_STOPPED");
@@ -133,7 +154,7 @@ async function controlledRun<T>(task: (signal: AbortSignal) => Promise<T>) {
   activeRun?.abort();
   const controller = new AbortController();
   activeRun = controller;
-  const timeout = setTimeout(() => controller.abort(new Error("AGENT_TIMEOUT")), RUN_TIMEOUT_MS);
+  const timeout = setTimeout(() => controller.abort(new Error("COMPUTER_USE_CHUNK_TIMEOUT")), RUN_TIMEOUT_MS);
   try {
     return await task(controller.signal);
   } finally {
@@ -143,7 +164,20 @@ async function controlledRun<T>(task: (signal: AbortSignal) => Promise<T>) {
 }
 
 export async function runComputerUse(goal: string) {
-  return controlledRun((signal) => runLoop(goal, { steps: 0, observations: 0 }, signal));
+  const progress = { steps: 0, observations: 0 };
+  try {
+    return await controlledRun((signal) => runLoop(goal, progress, signal));
+  } catch (error) {
+    if (!(error instanceof Error) || error.message !== "COMPUTER_USE_CHUNK_TIMEOUT") throw error;
+    const state = store.snapshot();
+    return {
+      ok: false,
+      continuationRequired: true,
+      steps: progress.steps,
+      currentUrl: state.currentUrl,
+      message: "操作時間ごとに画面状態を保存し、次の実行へ継続します。",
+    };
+  }
 }
 
 export async function approveComputerUse(id: string) {

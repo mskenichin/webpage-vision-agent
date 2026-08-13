@@ -3,12 +3,14 @@ import { z } from "zod";
 import { browserManager } from "@/lib/browser";
 import { requiresBrowserTask, runBrowserTask } from "@/lib/browser-task";
 import { store } from "@/lib/store";
+import { runTaskMode, type TaskModeResult } from "@/lib/task-mode";
 
 export const runtime = "nodejs";
 
 const messageSchema = z.object({
   role: z.enum(["user", "assistant"]),
   content: z.string().trim().min(1).max(8000),
+  mode: z.enum(["normal", "task"]).default("normal"),
 });
 
 export async function POST(request: Request) {
@@ -18,14 +20,18 @@ export async function POST(request: Request) {
   store.addProcessLog(
     "realtime",
     "success",
-    parsed.data.role === "user" ? "音声入力の文字起こしを確定しました" : "Realtime LLM応答を受信しました",
+    parsed.data.role === "user"
+      ? `音声入力の文字起こしを確定しました (${parsed.data.mode === "task" ? "タスクモード" : "通常モード"})`
+      : "Realtime LLM応答を受信しました",
     parsed.data.role === "assistant" ? parsed.data.content : undefined,
   );
-  let browserTask: Awaited<ReturnType<typeof runBrowserTask>> | null = null;
+  let browserTask: Awaited<ReturnType<typeof runBrowserTask>> | TaskModeResult | null = null;
   if (parsed.data.role === "user" && requiresBrowserTask(parsed.data.content, store.snapshot().currentUrl)) {
     try {
       store.addProcessLog("browser", "info", "音声要求に対応するページを探索しています");
-      browserTask = await runBrowserTask(parsed.data.content);
+      browserTask = parsed.data.mode === "task"
+        ? await runTaskMode(parsed.data.content)
+        : await runBrowserTask(parsed.data.content);
       store.addProcessLog("browser", "success", "音声要求のブラウザ操作が完了しました", browserTask.message);
     } catch (error) {
       console.error("Deterministic voice browser task failed", error);

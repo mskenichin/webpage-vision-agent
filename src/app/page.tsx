@@ -1,13 +1,13 @@
 "use client";
 
 import {
-  ArrowLeft, ArrowRight, Bot, ChevronRight, History, LoaderCircle, Mic, MicOff, PanelRight,
-  RefreshCw, ScrollText, Send, ShieldAlert, SlidersHorizontal, Sparkles, Square, Trash2, UserRound,
+  ArrowLeft, ArrowRight, Bot, ChevronDown, ChevronRight, History, LoaderCircle, Mic, MicOff, PanelRight,
+  ListChecks, MessageSquare, RefreshCw, ScrollText, Send, ShieldAlert, SlidersHorizontal, Sparkles, Square, Trash2, UserRound,
   Volume2, VolumeX, X,
 } from "lucide-react";
 import { FormEvent, useEffect, useRef, useState } from "react";
 import { displayPointToFrame, type FrameSize } from "@/lib/browser-frame";
-import type { AppState, BrowserAction, PageContext, Profile } from "@/lib/domain";
+import type { AppState, BrowserAction, ExecutionMode, PageContext, Profile } from "@/lib/domain";
 import { realtimeInstructions } from "@/lib/realtime-instructions";
 
 const statusLabels: Record<AppState["browserStatus"], string> = {
@@ -49,6 +49,7 @@ export default function Home() {
   const [transcribing, setTranscribing] = useState(false);
   const [voiceMode, setVoiceMode] = useState(false);
   const [voiceMuted, setVoiceMuted] = useState(false);
+  const [executionMode, setExecutionMode] = useState<ExecutionMode>("normal");
   const [logsVisible, setLogsVisible] = useState(false);
   const [profileOpen, setProfileOpen] = useState(false);
   const [mobilePane, setMobilePane] = useState<"web" | "chat">("web");
@@ -79,12 +80,17 @@ export default function Home() {
   useEffect(() => {
     let active = true;
     const retiredBrowserFrameUrls = retiredBrowserFrameUrlsRef.current;
+    const savedExecutionMode = window.localStorage.getItem("webpage-vision-execution-mode");
+    const restoreModeTimer = window.setTimeout(() => {
+      if (savedExecutionMode === "normal" || savedExecutionMode === "task") setExecutionMode(savedExecutionMode);
+    });
     void jsonRequest<AppState>("/api/session", { method: "POST" })
       .then((data) => { if (active) setState(data); })
       .catch((cause: Error) => { if (active) setError(cause.message); })
       .finally(() => { if (active) setBrowserBusy(false); });
     return () => {
       active = false;
+      window.clearTimeout(restoreModeTimer);
       dataChannelRef.current?.close();
       peerConnectionRef.current?.close();
       realtimeAudioRef.current?.pause();
@@ -133,6 +139,7 @@ export default function Home() {
       })
       .catch((cause) => {
         if (cause instanceof DOMException && cause.name === "AbortError") return;
+        setBrowserBusy(false);
         if (!browserFrameUrlRef.current) setError(cause instanceof Error ? cause.message : "ブラウザ画面を同期できませんでした。");
       });
     return () => {
@@ -319,6 +326,11 @@ export default function Home() {
     });
   }
 
+  function selectExecutionMode(mode: ExecutionMode) {
+    setExecutionMode(mode);
+    window.localStorage.setItem("webpage-vision-execution-mode", mode);
+  }
+
   async function submitMessage(text = message) {
     const value = text.trim();
     if (!value || sending) return;
@@ -327,13 +339,19 @@ export default function Home() {
     setSending(true);
     setError("");
     try {
-      const next = await jsonRequest<AppState>("/api/chat", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message: value }),
-      });
+      let continuation = false;
+      let next: AppState & { taskContinuation?: boolean };
+      do {
+        next = await jsonRequest<AppState & { taskContinuation?: boolean }>("/api/chat", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ message: value, mode: executionMode, continuation }),
+        });
+        setState(next);
+        setFrame((current) => current + 1);
+        continuation = next.taskContinuation === true;
+      } while (continuation);
       setState(next);
-      setFrame((current) => current + 1);
       const latest = [...next.messages].reverse().find((item) => item.role === "assistant");
       if (latest && !voiceMuted) {
         await playSpeech(latest.content).catch((cause) => {
@@ -413,7 +431,7 @@ export default function Home() {
     }>("/api/realtime/message", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ role, content }),
+      body: JSON.stringify({ role, content, mode: executionMode }),
     });
     setState(result.state);
     stateRef.current = result.state;
@@ -470,7 +488,7 @@ export default function Home() {
       const result = await jsonRequest<{ pageContext?: PageContext }>("/api/realtime/tool", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name: event.name, arguments: args }),
+        body: JSON.stringify({ name: event.name, arguments: args, mode: executionMode }),
       });
       dataChannelRef.current?.send(JSON.stringify({
         type: "conversation.item.create",
@@ -636,12 +654,26 @@ export default function Home() {
     setBrowserBusy(decision === "approve");
     setError("");
     try {
-      const response = await jsonRequest<{ state: AppState }>("/api/approval", {
+      const response = await jsonRequest<{ state: AppState; taskContinuation?: boolean }>("/api/approval", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ id: approval.id, decision }),
       });
-      setState(response.state);
+      let next = response.state;
+      let continuation = response.taskContinuation === true;
+      const taskGoal = [...next.messages].reverse().find((item) => item.role === "user")?.content ?? "タスクを続行する";
+      while (decision === "approve" && continuation) {
+        const continued = await jsonRequest<AppState & { taskContinuation?: boolean }>("/api/chat", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ message: taskGoal, mode: "task", continuation: true }),
+        });
+        next = continued;
+        setState(next);
+        setFrame((value) => value + 1);
+        continuation = continued.taskContinuation === true;
+      }
+      setState(next);
       setFrame((value) => value + 1);
       if (dataChannelRef.current?.readyState === "open") {
         dataChannelRef.current.send(JSON.stringify({
@@ -733,7 +765,11 @@ export default function Home() {
 
         <aside className={`chat-pane ${mobilePane === "chat" ? "mobile-active" : ""}`} aria-label="AIアシスタント">
           <div className="chat-heading">
-            <div><span className="eyebrow">AI CONCIERGE</span><h2>ご希望を伺います</h2></div>
+            <div><span className="eyebrow">AI CONCIERGE</span><h2>ご希望を伺います</h2>
+              <div className={`task-status ${state?.approval ? "awaiting" : sending ? "running" : "idle"}`} role="status" aria-live="polite">
+                <span />{state?.approval ? "承認待ち" : sending ? executionMode === "task" ? "タスクを実行中" : "応答を生成中" : "待機中"}
+              </div>
+            </div>
             <div className="chat-heading-actions">
               <button className={`icon-button compact ${logsVisible ? "is-active" : ""}`} title={logsVisible ? "処理ログを非表示" : "処理ログを表示"} aria-label={logsVisible ? "処理ログを非表示" : "処理ログを表示"} aria-pressed={logsVisible} onClick={() => setLogsVisible((value) => !value)}><ScrollText size={17} /></button>
               <button className="icon-button compact" title="チャットと処理ログをクリア" aria-label="チャットと処理ログをクリア" disabled={sending || (!state?.messages.length && !state?.processLogs.length)} onClick={() => void clearConversation()}><Trash2 size={17} /></button>
@@ -751,8 +787,10 @@ export default function Home() {
                 {[...(state?.processLogs ?? [])].reverse().map((log) => (
                   <article className={`process-log process-log-${log.level}`} key={log.id}>
                     <div><time dateTime={log.createdAt}>{new Date(log.createdAt).toLocaleTimeString("ja-JP", { hour: "2-digit", minute: "2-digit", second: "2-digit" })}</time><span>{log.source}</span></div>
-                    <strong>{log.message}</strong>
-                    {log.detail && <p>{log.detail}</p>}
+                    {log.detail ? <details>
+                      <summary><strong>{log.message}</strong><ChevronDown size={14} aria-hidden="true" /></summary>
+                      <pre>{log.detail}</pre>
+                    </details> : <strong>{log.message}</strong>}
                   </article>
                 ))}
               </div>
@@ -778,10 +816,14 @@ export default function Home() {
 
           <form className="composer" onSubmit={(event: FormEvent) => { event.preventDefault(); void submitMessage(); }}>
             {(interimText || voiceMode) && <div className="transcript"><span className="recording-dot" />{interimText || (transcribing ? "音声セッションに接続しています…" : recording ? "お話しください" : sending ? "応答を生成しています…" : "次の発話を待っています…")}</div>}
+            <div className="execution-mode" role="group" aria-label="実行モード">
+              <button type="button" className={executionMode === "normal" ? "active" : ""} aria-pressed={executionMode === "normal"} onClick={() => selectExecutionMode("normal")} disabled={sending} title="通常モード"><MessageSquare size={14} />通常</button>
+              <button type="button" className={executionMode === "task" ? "active" : ""} aria-pressed={executionMode === "task"} onClick={() => selectExecutionMode("task")} disabled={sending || state?.agentMode !== "foundry"} title={state?.agentMode === "foundry" ? "複合依頼を計画して最後まで実行" : "Foundry接続時に利用できます"}><ListChecks size={14} />タスク</button>
+            </div>
             <textarea value={message} onChange={(event) => setMessage(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); void submitMessage(); } }} placeholder="例: 家族で使いやすいSUVを見せて" rows={3} disabled={sending} />
             <div className="composer-actions">
               <button type="button" className={`voice-button ${voiceMode ? "recording" : ""}`} onClick={() => void toggleRecording()} title={voiceMode ? "音声入力モードを停止" : "音声入力モードを開始"}>{voiceMode ? <MicOff size={19} /> : transcribing ? <LoaderCircle size={18} className="spin" /> : <Mic size={19} />}</button>
-              <span>{voiceMode ? transcribing ? "接続中" : recording ? "リアルタイム音声" : "応答中。音声モードは継続" : "テキストまたは音声"}</span>
+              <span>{voiceMode ? transcribing ? "接続中" : recording ? "リアルタイム音声" : "応答中。音声モードは継続" : executionMode === "task" ? "タスクモードで実行" : "通常モードで実行"}</span>
               <button type={sending ? "button" : "submit"} className="send-button" disabled={!sending && !message.trim()} title={sending ? "生成と操作を停止" : "送信"} onClick={sending ? () => void stopAgent() : undefined}>{sending ? <Square size={16} fill="currentColor" /> : <Send size={17} />}</button>
             </div>
           </form>

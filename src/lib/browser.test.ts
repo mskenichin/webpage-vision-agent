@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { isAllowedUrl, requiresRiskInspection, revealQueryText } from "./browser";
+import { actionRisk, isAllowedUrl, isWebNavigationUrl, requiresRiskInspection, revealQueryText } from "./browser";
 
 describe("isAllowedUrl", () => {
   it("allows only HTTPS URLs on Lexus domains", () => {
@@ -8,6 +8,13 @@ describe("isAllowedUrl", () => {
     expect(isAllowedUrl("http://lexus.jp/models/is/")).toBe(false);
     expect(isAllowedUrl("https://example.com/")).toBe(false);
     expect(isAllowedUrl("https://lexus.jp.example.com/")).toBe(false);
+  });
+});
+
+describe("isWebNavigationUrl", () => {
+  it("only classifies HTTP links as web navigation", () => {
+    expect(isWebNavigationUrl("https://lexus.jp/request/estimate_sim/option")).toBe(true);
+    expect(isWebNavigationUrl("javascript:void(0)")).toBe(false);
   });
 });
 
@@ -30,5 +37,18 @@ describe("requiresRiskInspection", () => {
     expect(requiresRiskInspection({ type: "scroll", deltaY: 600, actor: "agent" })).toBe(false);
     expect(requiresRiskInspection({ type: "key", key: "ArrowDown", actor: "agent" })).toBe(false);
     expect(requiresRiskInspection({ type: "back", actor: "agent" })).toBe(false);
+  });
+});
+
+describe("actionRisk", () => {
+  it("does not treat an ordinary choice inside a sensitive form as the final action", () => {
+    expect(actionRisk("IS F SPORT モデルを選択")).toBeNull();
+    expect(actionRisk("次へ", "submit")).toBeNull();
+  });
+
+  it("requires approval for explicit sensitive actions and personal fields", () => {
+    expect(actionRisk("試乗予約を申し込む")).toContain("外部へ影響");
+    expect(actionRisk("メールアドレス", "email")).toContain("個人情報");
+    expect(actionRisk("ファイルを選択", "file")).toContain("個人情報");
   });
 });

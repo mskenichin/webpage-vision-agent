@@ -5,13 +5,18 @@ import { runBrowserTask } from "@/lib/browser-task";
 import { stopComputerUse } from "@/lib/computer-use";
 import { delegateComplexQuery } from "@/lib/delegation";
 import { store } from "@/lib/store";
+import { cancelTaskMode, runTaskMode } from "@/lib/task-mode";
 
 export const runtime = "nodejs";
 export const maxDuration = 120;
 
 const toolSchema = z.discriminatedUnion("name", [
   z.object({ name: z.literal("delegate_complex_query"), arguments: z.object({ query: z.string().trim().min(1).max(4000) }) }),
-  z.object({ name: z.literal("request_browser_task"), arguments: z.object({ goal: z.string().trim().min(1).max(2000) }) }),
+  z.object({
+    name: z.literal("request_browser_task"),
+    arguments: z.object({ goal: z.string().trim().min(1).max(2000) }),
+    mode: z.enum(["normal", "task"]).default("normal"),
+  }),
 ]);
 
 export async function POST(request: Request) {
@@ -27,7 +32,9 @@ export async function POST(request: Request) {
       store.addProcessLog("realtime", "success", `${toolName}が完了しました (${result.model})`, result.text);
       return NextResponse.json(result);
     }
-    const result = await runBrowserTask(parsed.data.arguments.goal);
+    const result = parsed.data.mode === "task"
+      ? await runTaskMode(parsed.data.arguments.goal)
+      : await runBrowserTask(parsed.data.arguments.goal);
     const pageContext = await browserManager.pageContext(parsed.data.arguments.goal, true);
     store.addProcessLog("realtime", "success", `${toolName}が完了しました`, result.message);
     return NextResponse.json({ ...result, pageContext });
@@ -39,6 +46,7 @@ export async function POST(request: Request) {
 }
 
 export async function DELETE() {
+  cancelTaskMode();
   stopComputerUse();
   return NextResponse.json(store.snapshot());
 }
