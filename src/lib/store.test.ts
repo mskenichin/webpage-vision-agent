@@ -18,6 +18,9 @@ function pendingApproval(): PendingApproval {
     safetyChecks: [{ id: "check-1", code: "external_side_effect", message: "送信操作です。" }],
     steps: 2,
     observations: 1,
+    modelCalls: 3,
+    modelDurationMs: 1_200,
+    screenshotDurationMs: 240,
   };
 }
 

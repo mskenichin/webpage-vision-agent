@@ -1,0 +1,9 @@
+[
+  {
+    "id": "T01",
+    "name": "IS見積構成",
+    "startUrl": "https://lexus.jp/",
+    "allowApprovals": true,
+    "prompt": "レクサスISで、F SPORT、白系のボディカラー、選択可能なメーカーオプションをすべて選び、見積結果を表示してください。販売店オプションは選択しないでください。"
+  }
+]

@@ -1,6 +1,7 @@
-import { DefaultAzureCredential } from "@azure/identity";
 import { z } from "zod";
-import { browserManager } from "./browser";
+import { runWithTimeout } from "./abort-timeout";
+import { azureBearerToken } from "./azure-auth";
+import { browserManager, type TaskBrowserObservation } from "./browser";
 import { browserTaskRequest, runBrowserTask } from "./browser-task";
 import type { ApprovalRequest } from "./domain";
 import { store } from "./store";
@@ -66,11 +67,42 @@ interface ActiveTask {
   stepAttempts: number;
   plannedSteps: number;
   replans: number;
+  latestObservation: TaskBrowserObservation | null;
 }
 
 let activeTask: ActiveTask | null = null;
 const MAX_PLANNED_STEPS = 12;
 const MAX_REPLANS = 4;
+
+export function combineTaskConstraints(stepConstraints: TaskStep["constraints"], goalConstraints: TaskPlan["goalConstraints"]) {
+  const combined = new Map<string, TaskStep["constraints"][number]>();
+  for (const constraint of [...stepConstraints, ...goalConstraints]) {
+    const existing = combined.get(constraint.id);
+    if (existing && JSON.stringify(existing) !== JSON.stringify(constraint)) {
+      throw new Error(`TASK_CONSTRAINT_ID_COLLISION:${constraint.id}`);
+    }
+    combined.set(constraint.id, constraint);
+  }
+  return [...combined.values()];
+}
+
+export function normalizeStepConstraintIds(step: TaskStep, goalConstraints: TaskPlan["goalConstraints"]) {
+  const usedIds = new Set(goalConstraints.map((constraint) => constraint.id));
+  return {
+    ...step,
+    constraints: step.constraints.map((constraint, index) => {
+      let id = constraint.id;
+      let suffix = 1;
+      while (usedIds.has(id)) {
+        const prefix = `step-${index + 1}-${suffix}-`;
+        id = `${prefix}${constraint.id}`.slice(0, 80);
+        suffix += 1;
+      }
+      usedIds.add(id);
+      return id === constraint.id ? constraint : { ...constraint, id };
+    }),
+  };
+}
 
 export function parseTaskPlan(text: string) {
   const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/i)?.[1];
@@ -128,14 +160,11 @@ export function taskStepExecutionGoal(goal: string, step: TaskStep, stepNumber: 
 async function requestPlanFromModel(model: string, goal: string, signal: AbortSignal) {
   const endpoint = process.env.AZURE_FOUNDRY_ENDPOINT?.replace(/\/$/, "");
   if (!endpoint) throw new Error("MODEL_UNAVAILABLE");
-  const credential = new DefaultAzureCredential();
-  const token = await credential.getToken("https://cognitiveservices.azure.com/.default");
-  if (!token) throw new Error("MODEL_UNAVAILABLE");
+  const token = await azureBearerToken();
   const state = store.snapshot();
-  const pageContext = await browserManager.pageContext(goal, true).catch(() => undefined);
   const response = await fetch(`${endpoint}/openai/v1/responses`, {
     method: "POST",
-    headers: { Authorization: `Bearer ${token.token}`, "Content-Type": "application/json" },
+    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
     signal,
     body: JSON.stringify({
       model,
@@ -147,7 +176,7 @@ async function requestPlanFromModel(model: string, goal: string, signal: AbortSi
     JSON以外を出力せず、次の形式に厳密に従ってください: {"summary":"...","goalConstraints":[{"id":"...","target":{"kind":"selection","label":"..."},"operator":"equals","expected":"...","evidence":["screenshot","page_text"],"description":"..."}]}`,
       input: [{
         role: "user",
-        content: `ユーザー要求: ${goal}\n現在URL: ${state.currentUrl}\n現在画面: ${pageContext?.text.slice(0, 3000) ?? "取得できません"}`,
+        content: `ユーザー要求: ${goal}\n現在URL: ${state.currentUrl}`,
       }],
       store: false,
     }),
@@ -168,13 +197,14 @@ export function parseNextTaskStep(text: string) {
 async function requestNextStepFromModel(model: string, task: ActiveTask, signal: AbortSignal) {
   const endpoint = process.env.AZURE_FOUNDRY_ENDPOINT?.replace(/\/$/, "");
   if (!endpoint) throw new Error("MODEL_UNAVAILABLE");
-  const credential = new DefaultAzureCredential();
-  const token = await credential.getToken("https://cognitiveservices.azure.com/.default");
-  if (!token) throw new Error("MODEL_UNAVAILABLE");
-  const pageContext = await browserManager.pageContext(task.goal, false);
+  const token = await azureBearerToken();
+  const cachedObservation = task.latestObservation?.revision === browserManager.currentRevision()
+    ? task.latestObservation
+    : null;
+  const pageContext = cachedObservation?.pageContext ?? await browserManager.pageContext(task.goal, false);
   const response = await fetch(`${endpoint}/openai/v1/responses`, {
     method: "POST",
-    headers: { Authorization: `Bearer ${token.token}`, "Content-Type": "application/json" },
+    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
     signal,
     body: JSON.stringify({
       model,
@@ -199,33 +229,33 @@ JSON以外を出力せず、次の形式に厳密に従ってください: {"id"
   return parseNextTaskStep(text);
 }
 
-async function withTimeout<T>(milliseconds: number, task: (signal: AbortSignal) => Promise<T>) {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), milliseconds);
-  try {
-    return await task(controller.signal);
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
 export async function createTaskPlan(goal: string) {
-  const primary = process.env.AZURE_EXPERT_MODEL ?? "gpt-5.6-sol";
+  const primary = process.env.AZURE_TASK_PLANNER_MODEL ?? process.env.AZURE_EXPERT_MODEL ?? "gpt-5.6-sol";
   const fallback = process.env.AZURE_CHAT_MODEL ?? "gpt-5.4";
+  const startedAt = Date.now();
   try {
-    return await withTimeout(15_000, (signal) => requestPlanFromModel(primary, goal, signal));
+    const plan = await runWithTimeout(15_000, (signal) => requestPlanFromModel(primary, goal, signal));
+    store.addProcessLog("agent", "info", `Goal Planner: ${Date.now() - startedAt}ms`, primary);
+    return plan;
   } catch {
-    return withTimeout(20_000, (signal) => requestPlanFromModel(fallback, goal, signal));
+    const plan = await runWithTimeout(20_000, (signal) => requestPlanFromModel(fallback, goal, signal));
+    store.addProcessLog("agent", "info", `Goal Planner: ${Date.now() - startedAt}ms`, `${primary}から${fallback}へフォールバック`);
+    return plan;
   }
 }
 
 async function createNextTaskStep(task: ActiveTask) {
-  const primary = process.env.AZURE_EXPERT_MODEL ?? "gpt-5.6-sol";
+  const primary = process.env.AZURE_TASK_PLANNER_MODEL ?? process.env.AZURE_EXPERT_MODEL ?? "gpt-5.6-sol";
   const fallback = process.env.AZURE_CHAT_MODEL ?? "gpt-5.4";
+  const startedAt = Date.now();
   try {
-    return await withTimeout(15_000, (signal) => requestNextStepFromModel(primary, task, signal));
+    const step = await runWithTimeout(15_000, (signal) => requestNextStepFromModel(primary, task, signal));
+    store.addProcessLog("agent", "info", `Next-Step Planner: ${Date.now() - startedAt}ms`, primary);
+    return step;
   } catch {
-    return withTimeout(20_000, (signal) => requestNextStepFromModel(fallback, task, signal));
+    const step = await runWithTimeout(20_000, (signal) => requestNextStepFromModel(fallback, task, signal));
+    store.addProcessLog("agent", "info", `Next-Step Planner: ${Date.now() - startedAt}ms`, `${primary}から${fallback}へフォールバック`);
+    return step;
   }
 }
 
@@ -284,7 +314,17 @@ async function verifyAndAdvanceActiveStep(result: unknown): Promise<TaskModeResu
   if (hasUnmetCondition(result)) return retryOrReplanStep(result, result.message);
   const step = activeTask.currentStep;
   if (!step) throw new Error("TASK_STEP_UNAVAILABLE");
-  const verification = await verifyTaskConstraints(step.constraints);
+  const observation = await browserManager.taskObservation(
+    [...step.constraints, ...activeTask.plan.goalConstraints].map((constraint) => constraint.description).join(" "),
+  );
+  activeTask.latestObservation = observation;
+  const verification = await verifyTaskConstraints(
+    combineTaskConstraints(step.constraints, activeTask.plan.goalConstraints),
+    observation,
+  );
+  activeTask.goalEvidence = verification.results.filter((item) =>
+    activeTask?.plan.goalConstraints.some((constraint) => constraint.id === item.id),
+  );
   const failed = failedConstraintResults(step.constraints, verification);
   if (failed.length > 0) {
     const detail = JSON.stringify({ constraints: step.constraints, results: verification.results }, null, 2);
@@ -296,20 +336,18 @@ async function verifyAndAdvanceActiveStep(result: unknown): Promise<TaskModeResu
     "agent",
     "success",
     `Verifier: サブタスク ${activeTask.plannedSteps}の制約を確認しました`,
-    JSON.stringify({ constraints: step.constraints, results: verification.results }, null, 2),
+    JSON.stringify({ constraints: step.constraints, results: verification.results, model: verification.model, durationMs: verification.durationMs, observationRevision: verification.observationRevision }, null, 2),
   );
   activeTask.completedSteps.push({ instruction: step.instruction, constraintIds: step.constraints.map((constraint) => constraint.id) });
   activeTask.currentStep = null;
   activeTask.stepAttempts = 0;
   const progress = resultProgress(result);
-  const goalVerification = await verifyTaskConstraints(activeTask.plan.goalConstraints);
-  activeTask.goalEvidence = goalVerification.results;
-  const unmetGoals = failedConstraintResults(activeTask.plan.goalConstraints, goalVerification);
+  const unmetGoals = failedConstraintResults(activeTask.plan.goalConstraints, verification);
   store.addProcessLog(
     "agent",
     unmetGoals.length === 0 ? "success" : "info",
     unmetGoals.length === 0 ? "Verifier: 全ゴール制約を確認しました" : `Verifier: 未達または証拠不足のゴールが${unmetGoals.length}件あります`,
-    JSON.stringify({ constraints: activeTask.plan.goalConstraints, results: goalVerification.results }, null, 2),
+    JSON.stringify({ constraints: activeTask.plan.goalConstraints, results: activeTask.goalEvidence, model: verification.model, durationMs: verification.durationMs, observationRevision: verification.observationRevision }, null, 2),
   );
   if (unmetGoals.length > 0) {
     if (activeTask.plannedSteps >= MAX_PLANNED_STEPS) {
@@ -329,7 +367,10 @@ async function executeActiveTask(): Promise<TaskModeResult> {
     if (activeTask.plannedSteps >= MAX_PLANNED_STEPS) {
       return taskIncomplete(null, "逐次計画の上限に達しました。");
     }
-    activeTask.currentStep = await createNextTaskStep(activeTask);
+    activeTask.currentStep = normalizeStepConstraintIds(
+      await createNextTaskStep(activeTask),
+      activeTask.plan.goalConstraints,
+    );
     activeTask.plannedSteps += 1;
     store.addProcessLog(
       "agent",
@@ -339,6 +380,7 @@ async function executeActiveTask(): Promise<TaskModeResult> {
     );
   }
   const step = activeTask.currentStep;
+  activeTask.latestObservation = null;
   store.addProcessLog(
     "agent",
     "info",
@@ -369,6 +411,7 @@ export async function runTaskMode(goal: string): Promise<TaskModeResult> {
     stepAttempts: 0,
     plannedSteps: 0,
     replans: 0,
+    latestObservation: null,
   };
   store.addProcessLog(
     "agent",
@@ -376,14 +419,16 @@ export async function runTaskMode(goal: string): Promise<TaskModeResult> {
     `タスクのゴール制約を作成しました (${plan.goalConstraints.length}件)`,
     JSON.stringify(plan, null, 2),
   );
-  const initialVerification = await verifyTaskConstraints(plan.goalConstraints);
+  const initialObservation = await browserManager.taskObservation(plan.goalConstraints.map((constraint) => constraint.description).join(" "));
+  activeTask.latestObservation = initialObservation;
+  const initialVerification = await verifyTaskConstraints(plan.goalConstraints, initialObservation);
   activeTask.goalEvidence = initialVerification.results;
   const unmetGoals = failedConstraintResults(plan.goalConstraints, initialVerification);
   store.addProcessLog(
     "agent",
     unmetGoals.length === 0 ? "success" : "info",
     unmetGoals.length === 0 ? "Verifier: 全ゴール制約を確認しました" : `Verifier: 未達または証拠不足のゴールが${unmetGoals.length}件あります`,
-    JSON.stringify({ constraints: plan.goalConstraints, results: initialVerification.results }, null, 2),
+    JSON.stringify({ constraints: plan.goalConstraints, results: initialVerification.results, model: initialVerification.model, durationMs: initialVerification.durationMs, observationRevision: initialVerification.observationRevision }, null, 2),
   );
   if (unmetGoals.length === 0) {
     activeTask = null;

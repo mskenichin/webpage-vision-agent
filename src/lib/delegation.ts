@@ -1,4 +1,5 @@
 import { DefaultAzureCredential } from "@azure/identity";
+import { runWithTimeout } from "./abort-timeout";
 import type { ChatMessage, Interest, PageContext, Profile } from "./domain";
 import { pageContextInstructions } from "./page-context";
 import { profileInstructions } from "./profile-context";
@@ -44,16 +45,6 @@ async function requestModel(
   return text;
 }
 
-async function withTimeout<T>(milliseconds: number, task: (signal: AbortSignal) => Promise<T>) {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), milliseconds);
-  try {
-    return await task(controller.signal);
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
 export async function delegateComplexQuery(
   query: string,
   profile: Profile,
@@ -65,8 +56,8 @@ export async function delegateComplexQuery(
   const primary = process.env.AZURE_EXPERT_MODEL ?? "gpt-5.6-sol";
   const fallback = process.env.AZURE_CHAT_MODEL ?? "gpt-5.4";
   try {
-    return { text: await withTimeout(8_000, (signal) => requestModel(primary, query, profile, messages, currentUrl, interests, pageContext, signal)), model: primary };
+    return { text: await runWithTimeout(8_000, (signal) => requestModel(primary, query, profile, messages, currentUrl, interests, pageContext, signal)), model: primary };
   } catch {
-    return { text: await withTimeout(12_000, (signal) => requestModel(fallback, query, profile, messages, currentUrl, interests, pageContext, signal)), model: fallback };
+    return { text: await runWithTimeout(12_000, (signal) => requestModel(fallback, query, profile, messages, currentUrl, interests, pageContext, signal)), model: fallback };
   }
 }

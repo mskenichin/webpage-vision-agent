@@ -1,6 +1,7 @@
-import { DefaultAzureCredential } from "@azure/identity";
 import { z } from "zod";
-import { browserManager } from "./browser";
+import { runWithTimeout } from "./abort-timeout";
+import { azureBearerToken } from "./azure-auth";
+import { browserManager, type TaskBrowserObservation } from "./browser";
 
 export const taskConstraintSchema = z.object({
   id: z.string().trim().min(1).max(80),
@@ -34,7 +35,7 @@ const constraintResultSchema = z.object({
 });
 
 export const verificationResultSchema = z.object({
-  results: z.array(constraintResultSchema).min(1).max(20),
+  results: z.array(constraintResultSchema).min(1).max(32),
 });
 
 export type VerificationResult = z.infer<typeof verificationResultSchema>;
@@ -52,19 +53,14 @@ export function failedConstraintResults(constraints: TaskConstraint[], verificat
   });
 }
 
-async function requestVerification(model: string, constraints: TaskConstraint[], signal: AbortSignal) {
+async function requestVerification(model: string, constraints: TaskConstraint[], observation: TaskBrowserObservation, signal: AbortSignal) {
   const endpoint = process.env.AZURE_FOUNDRY_ENDPOINT?.replace(/\/$/, "");
   if (!endpoint) throw new Error("MODEL_UNAVAILABLE");
-  const credential = new DefaultAzureCredential();
-  const token = await credential.getToken("https://cognitiveservices.azure.com/.default");
-  if (!token) throw new Error("MODEL_UNAVAILABLE");
-  const [screenshot, pageContext] = await Promise.all([
-    browserManager.computerScreenshot(),
-    browserManager.pageContext(constraints.map((constraint) => constraint.description).join(" "), false),
-  ]);
+  const token = await azureBearerToken();
+  const { image, pageContext } = observation;
   const response = await fetch(`${endpoint}/openai/v1/responses`, {
     method: "POST",
-    headers: { Authorization: `Bearer ${token.token}`, "Content-Type": "application/json" },
+    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
     signal,
     body: JSON.stringify({
       model,
@@ -78,7 +74,7 @@ JSON以外を出力せず、次の形式に厳密に従ってください: {"res
         role: "user",
         content: [
           { type: "input_text", text: `検証制約:\n${JSON.stringify(constraints)}\n現在URL: ${pageContext.url}\nページ本文:\n${pageContext.text}` },
-          { type: "input_image", image_url: `data:image/jpeg;base64,${screenshot.toString("base64")}` },
+          { type: "input_image", image_url: `data:image/jpeg;base64,${image.toString("base64")}` },
         ],
       }],
       store: false,
@@ -92,22 +88,16 @@ JSON以外を出力せず、次の形式に厳密に従ってください: {"res
   return parseVerificationResult(text);
 }
 
-async function withTimeout<T>(milliseconds: number, task: (signal: AbortSignal) => Promise<T>) {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), milliseconds);
-  try {
-    return await task(controller.signal);
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
-export async function verifyTaskConstraints(constraints: TaskConstraint[]) {
-  const primary = process.env.AZURE_EXPERT_MODEL ?? "gpt-5.6-sol";
+export async function verifyTaskConstraints(constraints: TaskConstraint[], observation?: TaskBrowserObservation) {
+  const primary = process.env.AZURE_TASK_VERIFIER_MODEL ?? process.env.AZURE_EXPERT_MODEL ?? "gpt-5.6-sol";
   const fallback = process.env.AZURE_CHAT_MODEL ?? "gpt-5.4";
+  const captured = observation ?? await browserManager.taskObservation(constraints.map((constraint) => constraint.description).join(" "));
+  const startedAt = Date.now();
   try {
-    return await withTimeout(15_000, (signal) => requestVerification(primary, constraints, signal));
+    const verification = await runWithTimeout(15_000, (signal) => requestVerification(primary, constraints, captured, signal));
+    return { ...verification, model: primary, durationMs: Date.now() - startedAt, observationRevision: captured.revision };
   } catch {
-    return withTimeout(20_000, (signal) => requestVerification(fallback, constraints, signal));
+    const verification = await runWithTimeout(20_000, (signal) => requestVerification(fallback, constraints, captured, signal));
+    return { ...verification, model: fallback, durationMs: Date.now() - startedAt, observationRevision: captured.revision };
   }
 }

@@ -44,6 +44,9 @@ export interface PendingApproval {
   safetyChecks: Array<{ id: string; code: string; message: string }>;
   steps: number;
   observations: number;
+  modelCalls: number;
+  modelDurationMs: number;
+  screenshotDurationMs: number;
 }
 
 export class DemoStore {

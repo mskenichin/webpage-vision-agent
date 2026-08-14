@@ -1,5 +1,5 @@
-import { describe, expect, it } from "vitest";
-import { computerCompletion, computerCompletionReportsFailure, computerKeyChord } from "./foundry";
+import { describe, expect, it, vi } from "vitest";
+import { computerCompletion, computerCompletionReportsFailure, computerKeyChord, requestModelWithRetry } from "./foundry";
 
 describe("computerKeyChord", () => {
   it("normalizes Computer Use key names for Playwright", () => {
@@ -37,5 +37,23 @@ describe("computerCompletion", () => {
 
   it("does not mistake a successful no-remaining-items report for failure", () => {
     expect(computerCompletionReportsFailure("未選択で残っている項目はなく、成功条件を満たしています。")).toBe(false);
+  });
+});
+
+describe("requestModelWithRetry", () => {
+  it("retries a transient server error and returns the next successful response", async () => {
+    const request = vi.fn()
+      .mockResolvedValueOnce(new Response(null, { status: 500, headers: { "x-request-id": "request-1" } }))
+      .mockResolvedValueOnce(new Response("{}", { status: 200 }));
+
+    await expect(requestModelWithRetry(request, undefined, 3, 0)).resolves.toMatchObject({ status: 200 });
+    expect(request).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not retry a non-transient client error", async () => {
+    const request = vi.fn().mockResolvedValue(new Response("invalid", { status: 400 }));
+
+    await expect(requestModelWithRetry(request, undefined, 3, 0)).rejects.toThrow("MODEL_UNAVAILABLE:400:invalid");
+    expect(request).toHaveBeenCalledTimes(1);
   });
 });

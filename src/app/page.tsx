@@ -364,6 +364,7 @@ export default function Home() {
       await refreshState().catch(() => undefined);
     } finally {
       setSending(false);
+      setBrowserBusy(false);
     }
   }
 
@@ -752,7 +753,7 @@ export default function Home() {
           </div>
 
           <div className="browser-stage">
-            {(browserBusy || !state) && <div className="browser-loader"><LoaderCircle size={26} className="spin" /><span>{state?.browserStatus === "agent_running" ? "AIがページを操作しています" : "ブラウザを同期しています"}</span></div>}
+            {((browserBusy && state?.browserStatus !== "awaiting_approval") || !state) && <div className="browser-loader"><LoaderCircle size={26} className="spin" /><span>{state?.browserStatus === "agent_running" ? "AIがページを操作しています" : "ブラウザを同期しています"}</span></div>}
             {state?.browserStatus !== "failed" && browserFrameUrl && (
               // eslint-disable-next-line @next/next/no-img-element
               <img src={browserFrameUrl} alt="Lexus公式サイトのライブブラウザ画面" draggable={false} onClick={handleBrowserClick} onLoad={handleBrowserFrameLoad} />

@@ -8,6 +8,7 @@
     "start": "next start",
     "lint": "eslint",
     "test": "vitest run",
+    "benchmark:task": "node scripts/benchmark-task.mjs",
     "benchmark:voice": "node scripts/benchmark-voice.mjs",
     "benchmark:delegation": "node scripts/benchmark-delegation.mjs",
     "benchmark:delegation:judge": "node scripts/judge-delegation.mjs"

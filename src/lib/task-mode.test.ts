@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { parseNextTaskStep, parseTaskPlan, taskExecutionGoal, taskStepExecutionGoal, type TaskStep } from "./task-mode";
+import { combineTaskConstraints, normalizeStepConstraintIds, parseNextTaskStep, parseTaskPlan, taskExecutionGoal, taskStepExecutionGoal, type TaskStep } from "./task-mode";
 
 function step(id: string, instruction: string, description: string): TaskStep {
   return {
@@ -50,6 +50,28 @@ describe("task mode planning", () => {
     expect(next.id).toBe("grade");
     expect(next.constraints).toHaveLength(1);
     expect(() => parseNextTaskStep(JSON.stringify([next, next]))).toThrow();
+  });
+
+  it("deduplicates identical constraints for one combined verifier call", () => {
+    const constraint = step("grade", "F SPORTを選択する", "グレードがF SPORT").constraints[0];
+
+    expect(combineTaskConstraints([constraint], [constraint])).toEqual([constraint]);
+  });
+
+  it("rejects conflicting constraint IDs before combined verification", () => {
+    const first = step("grade", "F SPORTを選択する", "グレードがF SPORT").constraints[0];
+    const conflicting = { ...first, description: "別の成功条件" };
+
+    expect(() => combineTaskConstraints([first], [conflicting])).toThrow("TASK_CONSTRAINT_ID_COLLISION:grade-constraint");
+  });
+
+  it("normalizes dynamic step IDs that collide with goal constraints", () => {
+    const dynamicStep = step("grade", "F SPORTを選択する", "グレードがF SPORT");
+    const goalConstraint = { ...dynamicStep.constraints[0], description: "最終グレードがF SPORT" };
+    const normalized = normalizeStepConstraintIds(dynamicStep, [goalConstraint]);
+
+    expect(normalized.constraints[0].id).not.toBe(goalConstraint.id);
+    expect(combineTaskConstraints(normalized.constraints, [goalConstraint])).toHaveLength(2);
   });
 
   it("adds a zero-count guard for optional selections outside an all-selected category", () => {

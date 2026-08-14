@@ -14,6 +14,13 @@ export interface BrowserStreamFrame {
   revision: number;
 }
 
+export interface TaskBrowserObservation {
+  image: Buffer;
+  pageContext: PageContext;
+  revision: number;
+  capturedAt: string;
+}
+
 export function isAllowedUrl(value: string) {
   try {
     const url = new URL(value);
@@ -60,6 +67,11 @@ export function revealQueryText(query: string) {
   );
 }
 
+export function remainingStabilizationDelay(lastMutationAt: number, now = Date.now(), stabilizationMs = 250) {
+  if (lastMutationAt <= 0) return 0;
+  return Math.max(0, stabilizationMs - (now - lastMutationAt));
+}
+
 class BrowserManager {
   private browser: Browser | null = null;
   private context: BrowserContext | null = null;
@@ -72,6 +84,11 @@ class BrowserManager {
   private streamSubscribers = new Set<(frame: BrowserStreamFrame) => void>();
   private activeActor: Actor = "user";
   private activeOperationId = crypto.randomUUID();
+  private lastMutationAt = 0;
+
+  currentRevision() {
+    return this.frameRevision;
+  }
 
   private async serialize<T>(operation: () => Promise<T>) {
     const previous = this.operationTail;
@@ -163,12 +180,44 @@ class BrowserManager {
       await this.start();
       if (!this.page) throw new Error("Browser session is not available");
       await this.page.waitForLoadState("domcontentloaded", { timeout: 5_000 }).catch(() => undefined);
-      await this.page.waitForTimeout(500);
+      const stabilizationDelay = remainingStabilizationDelay(this.lastMutationAt);
+      if (stabilizationDelay > 0) await this.page.waitForTimeout(stabilizationDelay);
       await this.page.evaluate(async () => {
         await document.fonts.ready;
         await new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
       }).catch(() => undefined);
       return this.page.screenshot({ type: "jpeg", quality: 72, animations: "disabled" });
+    });
+  }
+
+  async taskObservation(query?: string): Promise<TaskBrowserObservation> {
+    return this.serialize(async () => {
+      await this.start();
+      if (!this.page) throw new Error("Browser session is not available");
+      const page = this.page;
+      await page.waitForLoadState("domcontentloaded", { timeout: 5_000 }).catch(() => undefined);
+      const stabilizationDelay = remainingStabilizationDelay(this.lastMutationAt);
+      if (stabilizationDelay > 0) await page.waitForTimeout(stabilizationDelay);
+      await page.evaluate(async () => {
+        await document.fonts.ready;
+        await new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
+      }).catch(() => undefined);
+      const [image, text, title] = await Promise.all([
+        page.screenshot({ type: "jpeg", quality: 72, animations: "disabled", timeout: 10_000 }),
+        page.evaluate(() => (document.querySelector("main") ?? document.body)?.innerText ?? ""),
+        page.title().catch(() => "Lexus"),
+      ]);
+      return {
+        image,
+        pageContext: {
+          url: page.url(),
+          title,
+          text: normalizePageText(text, query),
+          scope: "page" as const,
+        },
+        revision: this.frameRevision,
+        capturedAt: new Date().toISOString(),
+      };
     });
   }
 
@@ -340,6 +389,7 @@ class BrowserManager {
       store.setBrowser(action.actor === "agent" ? "agent_running" : "user_controlled");
 
       try {
+        this.lastMutationAt = Date.now();
         switch (action.type) {
           case "click":
             await this.click(action.x ?? 0, action.y ?? 0, action.actor, operationId);

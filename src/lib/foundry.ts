@@ -1,4 +1,4 @@
-import { DefaultAzureCredential } from "@azure/identity";
+import { azureBearerToken } from "./azure-auth";
 import type { BrowserAction, ChatMessage, Interest, PageContext, Profile } from "./domain";
 import { pageContextInstructions } from "./page-context";
 import { profileInstructions } from "./profile-context";
@@ -90,6 +90,57 @@ export function computerCompletion(payload: { id?: string; output?: FoundryOutpu
   };
 }
 
+const RETRYABLE_MODEL_STATUSES = new Set([429, 500, 502, 503, 504]);
+
+function modelRequestId(response: Response) {
+  return response.headers.get("x-request-id")
+    ?? response.headers.get("apim-request-id")
+    ?? response.headers.get("x-ms-request-id")
+    ?? "unknown";
+}
+
+function retryDelay(milliseconds: number, signal?: AbortSignal) {
+  if (milliseconds === 0) return Promise.resolve();
+  return new Promise<void>((resolve, reject) => {
+    const onAbort = () => {
+      clearTimeout(timer);
+      const reason = signal?.reason;
+      reject(reason instanceof Error ? reason : new Error("AGENT_STOPPED"));
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, milliseconds);
+    if (signal?.aborted) return onAbort();
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+export async function requestModelWithRetry(
+  request: () => Promise<Response>,
+  signal?: AbortSignal,
+  maxAttempts = 3,
+  baseDelayMs = 400,
+) {
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    const response = await request();
+    if (response.ok) return response;
+    const detail = (await response.text()).slice(0, 1000);
+    const requestId = modelRequestId(response);
+    if (!RETRYABLE_MODEL_STATUSES.has(response.status) || attempt === maxAttempts) {
+      throw new Error(`MODEL_UNAVAILABLE:${response.status}:${detail || "EMPTY_RESPONSE_BODY"}:request_id=${requestId}`);
+    }
+    store.addProcessLog(
+      "browser",
+      "info",
+      `Computer Useモデル呼び出しを再試行します (${attempt}/${maxAttempts})`,
+      `status=${response.status} request_id=${requestId} ${detail || "EMPTY_RESPONSE_BODY"}`,
+    );
+    await retryDelay(baseDelayMs * 2 ** (attempt - 1), signal);
+  }
+  throw new Error("MODEL_UNAVAILABLE:RETRY_EXHAUSTED");
+}
+
 export async function requestFoundryResponse(
   prompt: string,
   profile: Profile,
@@ -102,9 +153,7 @@ export async function requestFoundryResponse(
   const model = process.env.AZURE_CHAT_MODEL ?? "gpt-5.4";
   if (!endpoint) throw new Error("MODEL_UNAVAILABLE");
 
-  const credential = new DefaultAzureCredential();
-  const token = await credential.getToken("https://cognitiveservices.azure.com/.default");
-  if (!token) throw new Error("MODEL_UNAVAILABLE");
+  const token = await azureBearerToken();
 
   const history = messages
     .filter((message) => message.role !== "system")
@@ -114,7 +163,7 @@ export async function requestFoundryResponse(
 
   const response = await fetch(`${endpoint}/openai/v1/responses`, {
     method: "POST",
-    headers: { Authorization: `Bearer ${token.token}`, "Content-Type": "application/json" },
+    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
     body: JSON.stringify({
       model,
       instructions: `あなたはLexus公式サイトを案内する日本語のコンシェルジュです。簡潔で自然な会話を続けてください。表示中ページに関する質問は、提供されたページ内容を確認して回答してください。\n${profileInstructions(profile, interests)}\n現在URL: ${currentUrl}\n${pageContextInstructions(pageContext)}`,
@@ -166,9 +215,7 @@ export async function requestFoundryComputerStep(
 ): Promise<ComputerTurn> {
   const endpoint = process.env.AZURE_FOUNDRY_ENDPOINT?.replace(/\/$/, "");
   if (!endpoint) throw new Error("MODEL_UNAVAILABLE");
-  const credential = new DefaultAzureCredential();
-  const token = await credential.getToken("https://cognitiveservices.azure.com/.default");
-  if (!token) throw new Error("MODEL_UNAVAILABLE");
+  const token = await azureBearerToken();
 
   const imageUrl = `data:image/jpeg;base64,${screenshot.toString("base64")}`;
   const input = previous
@@ -193,9 +240,9 @@ ${profileInstructions(profile, interests)}\nユーザー要求: ${prompt}`,
           },
         ],
       }];
-  const response = await fetch(`${endpoint}/openai/v1/responses`, {
+  const response = await requestModelWithRetry(() => fetch(`${endpoint}/openai/v1/responses`, {
     method: "POST",
-    headers: { Authorization: `Bearer ${token.token}`, "Content-Type": "application/json" },
+    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
     signal,
     body: JSON.stringify({
       model: deployment,
@@ -204,11 +251,7 @@ ${profileInstructions(profile, interests)}\nユーザー要求: ${prompt}`,
       previous_response_id: previous?.responseId,
       truncation: "auto",
     }),
-  });
-  if (!response.ok) {
-    const detail = (await response.text()).slice(0, 1000);
-    throw new Error(`MODEL_UNAVAILABLE:${response.status}:${detail}`);
-  }
+  }), signal);
   const payload = await response.json() as { id?: string; output?: FoundryOutputItem[] };
   const call = payload.output?.find((item) => item.type === "computer_call");
   if (!payload.id || !call?.call_id) {

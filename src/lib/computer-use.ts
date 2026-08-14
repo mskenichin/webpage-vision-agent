@@ -33,6 +33,9 @@ function actionDescription(action: BrowserAction) {
 interface RunProgress {
   steps: number;
   observations: number;
+  modelCalls: number;
+  modelDurationMs: number;
+  screenshotDurationMs: number;
   previous?: {
     responseId: string;
     callId: string;
@@ -60,7 +63,26 @@ function approvalFor(goal: string, result: ComputerStep, progress: RunProgress):
     safetyChecks: result.safetyChecks,
     steps: progress.steps,
     observations: progress.observations,
+    modelCalls: progress.modelCalls,
+    modelDurationMs: progress.modelDurationMs,
+    screenshotDurationMs: progress.screenshotDurationMs,
   };
+}
+
+function logRunLatency(progress: RunProgress, deployment: string) {
+  store.addProcessLog(
+    "browser",
+    "info",
+    `Computer Use: ${progress.modelCalls}回 / ${progress.modelDurationMs + progress.screenshotDurationMs}ms`,
+    JSON.stringify({
+      model: deployment,
+      modelCalls: progress.modelCalls,
+      modelDurationMs: progress.modelDurationMs,
+      screenshotDurationMs: progress.screenshotDurationMs,
+      steps: progress.steps,
+      observations: progress.observations,
+    }, null, 2),
+  );
 }
 
 async function runLoop(goal: string, progress: RunProgress, signal: AbortSignal) {
@@ -73,16 +95,23 @@ async function runLoop(goal: string, progress: RunProgress, signal: AbortSignal)
     while (progress.steps < MAX_STEPS && progress.observations < MAX_OBSERVATIONS) {
       if (signal.aborted) throw new Error("AGENT_STOPPED");
       const state = store.snapshot();
+      const screenshotStartedAt = Date.now();
+      const screenshot = await browserManager.computerScreenshot();
+      progress.screenshotDurationMs += Date.now() - screenshotStartedAt;
+      const modelStartedAt = Date.now();
       const result = await requestFoundryComputerStep(
         goal,
-        await browserManager.computerScreenshot(),
+        screenshot,
         state.profile,
         deployment,
         progress.previous,
         signal,
         state.interests,
       );
+      progress.modelCalls += 1;
+      progress.modelDurationMs += Date.now() - modelStartedAt;
       if (result.completed) {
+        logRunLatency(progress, deployment);
         const completedState = store.snapshot();
         if (!result.goalAchieved) {
           return {
@@ -118,6 +147,7 @@ async function runLoop(goal: string, progress: RunProgress, signal: AbortSignal)
         const pending = approvalFor(goal, result, progress);
         store.setApproval(pending);
         store.addProcessLog("browser", "info", "Computer Useが承認を待っています", result.actions.map(actionDescription).join("、"));
+        logRunLatency(progress, deployment);
         return { ok: false, awaitingApproval: true, approval: pending.request, steps: progress.steps, currentUrl: state.currentUrl };
       }
       const key = result.actions.map(actionKey).join("|");
@@ -133,6 +163,7 @@ async function runLoop(goal: string, progress: RunProgress, signal: AbortSignal)
       if (remainingActions.length < result.actions.length) break;
     }
     const state = store.snapshot();
+    logRunLatency(progress, deployment);
     return {
       ok: false,
       continuationRequired: true,
@@ -150,33 +181,56 @@ async function runLoop(goal: string, progress: RunProgress, signal: AbortSignal)
   }
 }
 
-async function controlledRun<T>(task: (signal: AbortSignal) => Promise<T>) {
-  activeRun?.abort();
+export async function controlledRun<T>(task: (signal: AbortSignal) => Promise<T>, timeoutMs = RUN_TIMEOUT_MS) {
+  activeRun?.abort(new Error("AGENT_STOPPED"));
   const controller = new AbortController();
   activeRun = controller;
-  const timeout = setTimeout(() => controller.abort(new Error("COMPUTER_USE_CHUNK_TIMEOUT")), RUN_TIMEOUT_MS);
+  const timeout = setTimeout(() => controller.abort(new Error("COMPUTER_USE_CHUNK_TIMEOUT")), timeoutMs);
+  let removeAbortListener = () => {};
+  const aborted = new Promise<never>((_, reject) => {
+    const onAbort = () => reject(controller.signal.reason instanceof Error ? controller.signal.reason : new Error("AGENT_STOPPED"));
+    controller.signal.addEventListener("abort", onAbort, { once: true });
+    removeAbortListener = () => controller.signal.removeEventListener("abort", onAbort);
+  });
   try {
-    return await task(controller.signal);
+    return await Promise.race([task(controller.signal), aborted]);
+  } catch (error) {
+    if (isComputerUseChunkTimeout(error, controller.signal)) throw controller.signal.reason;
+    throw error;
   } finally {
     clearTimeout(timeout);
+    removeAbortListener();
     if (activeRun === controller) activeRun = null;
   }
 }
 
+export function isComputerUseChunkTimeout(error: unknown, signal?: AbortSignal) {
+  if (signal?.aborted && signal.reason instanceof Error
+    && signal.reason.message === "COMPUTER_USE_CHUNK_TIMEOUT") return true;
+  return error instanceof Error && error.message === "COMPUTER_USE_CHUNK_TIMEOUT";
+}
+
+function chunkContinuation(progress: RunProgress) {
+  const state = store.snapshot();
+  const deployment = process.env.AZURE_COMPUTER_MODEL ?? process.env.AZURE_CHAT_MODEL ?? "gpt-5.4";
+  logRunLatency(progress, deployment);
+  return {
+    ok: false,
+    awaitingApproval: false,
+    continuationRequired: true,
+    steps: progress.steps,
+    currentUrl: state.currentUrl,
+    message: "操作時間ごとに画面状態を保存し、次の実行へ継続します。",
+  };
+}
+
 export async function runComputerUse(goal: string) {
-  const progress = { steps: 0, observations: 0 };
+  const progress = { steps: 0, observations: 0, modelCalls: 0, modelDurationMs: 0, screenshotDurationMs: 0 };
   try {
     return await controlledRun((signal) => runLoop(goal, progress, signal));
   } catch (error) {
-    if (!(error instanceof Error) || error.message !== "COMPUTER_USE_CHUNK_TIMEOUT") throw error;
-    const state = store.snapshot();
-    return {
-      ok: false,
-      continuationRequired: true,
-      steps: progress.steps,
-      currentUrl: state.currentUrl,
-      message: "操作時間ごとに画面状態を保存し、次の実行へ継続します。",
-    };
+    if (!isComputerUseChunkTimeout(error)) throw error;
+    return chunkContinuation(progress);
   }
 }
 
@@ -187,7 +241,7 @@ export async function approveComputerUse(id: string) {
   for (const action of pending.actions) {
     await browserManager.execute(action, crypto.randomUUID());
   }
-  return controlledRun((signal) => runLoop(pending.goal, {
+  const progress = {
     steps: pending.steps + pending.actions.length,
     observations: pending.observations,
     previous: {
@@ -195,7 +249,16 @@ export async function approveComputerUse(id: string) {
       callId: pending.callId,
       acknowledgedSafetyChecks: pending.safetyChecks.filter((check) => check.code !== "local_sensitive_action"),
     },
-  }, signal));
+    modelCalls: pending.modelCalls,
+    modelDurationMs: pending.modelDurationMs,
+    screenshotDurationMs: pending.screenshotDurationMs,
+  };
+  try {
+    return await controlledRun((signal) => runLoop(pending.goal, progress, signal));
+  } catch (error) {
+    if (!isComputerUseChunkTimeout(error)) throw error;
+    return chunkContinuation(progress);
+  }
 }
 
 export function rejectComputerUse(id: string) {

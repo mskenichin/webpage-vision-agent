@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { actionRisk, isAllowedUrl, isWebNavigationUrl, requiresRiskInspection, revealQueryText } from "./browser";
+import { actionRisk, isAllowedUrl, isWebNavigationUrl, remainingStabilizationDelay, requiresRiskInspection, revealQueryText } from "./browser";
 
 describe("isAllowedUrl", () => {
   it("allows only HTTPS URLs on Lexus domains", () => {
@@ -50,5 +50,13 @@ describe("actionRisk", () => {
     expect(actionRisk("試乗予約を申し込む")).toContain("外部へ影響");
     expect(actionRisk("メールアドレス", "email")).toContain("個人情報");
     expect(actionRisk("ファイルを選択", "file")).toContain("個人情報");
+  });
+});
+
+describe("remainingStabilizationDelay", () => {
+  it("waits only for the unelapsed portion after a browser mutation", () => {
+    expect(remainingStabilizationDelay(1_000, 1_100)).toBe(150);
+    expect(remainingStabilizationDelay(1_000, 1_300)).toBe(0);
+    expect(remainingStabilizationDelay(0, 1_000)).toBe(0);
   });
 });

@@ -1,0 +1,112 @@
+{
+  "generatedAt": "2026-08-13T16:45:10.575Z",
+  "complete": true,
+  "baseUrl": "http://localhost:3000",
+  "methodology": {
+    "warmupRuns": 0,
+    "measuredRuns": 1,
+    "scenarios": 1,
+    "successCriterion": "final response completed without a system error and the process log contains successful verification of all goal constraints",
+    "approvalPolicy": "approve only when the scenario also declares allowApprovals=true"
+  },
+  "summary": {
+    "measuredRuns": 1,
+    "successfulRuns": 0,
+    "successRate": 0,
+    "elapsedP50Ms": 910705.334989,
+    "elapsedP95Ms": 910705.334989,
+    "elapsedMeanMs": 910705.334989,
+    "plannerMeanMs": 90076,
+    "verifierMeanMs": 224404,
+    "computerUseModelMeanMs": 469951,
+    "screenshotMeanMs": 26711,
+    "accountedMeanMs": 811142,
+    "unaccountedMeanMs": 99563.334989,
+    "computerUseModelCallsMean": 114,
+    "browserStepsMean": 92,
+    "replansMean": 2
+  },
+  "rows": [
+    {
+      "scenarioId": "T01",
+      "run": 1,
+      "warmup": false,
+      "success": false,
+      "elapsedMs": 910705.334989,
+      "continuations": 16,
+      "approvals": 2,
+      "currentUrl": "https://lexus.jp/request/estimate_sim/option",
+      "finalMessage": "タスクを完了できませんでした。見積対象の車種がレクサスISである。: 画面右側および本文下部に表示されている車種表記は『IS300h “F SPORT”』であり、『レクサス IS』という選択要約の明示表示は現在画面内で確認できない。\n現在の車種・グレード・カラー構成で選択可能なメーカーオプションがすべて選択されている。: 画面にはメーカーオプション一覧として『三眼フルLEDヘッドランプ』『ムーンルーフ』『“マークレビンソン”プレミアムサラウンドサウンドシステム』『アクセサリーコンセント』『“F SPORT”レッドブレーキキャリパー』『寒冷地仕様』等が表示されているが、各項目のチェック状態や選択済み要約、全件選択済みを示す表示は確認できない。\n販売店オプションが1件も選択されていない。: 現在画面はオプション選択画面で、販売店オプション項目が多数一覧表示されている一方、選択済み販売店オプション件数0や未選択状態の要約は確認できない。スクリーンショット上では左のチェックボックスが見えるが、一覧全体について『選択済み販売店オプションが0件』を示す明示表示はない。\n指定された白系ボディカラーと選択可能な全メーカーオプション以外に、要求されていない追加オプションが選択されていない。: 要求外カテゴリの選択済み追加オプションが0件であることを示す選択済み要約やカテゴリ別選択結果が確認できない。現在画面には販売店オプション/メーカーオプションの一覧があるのみで、要求外の追加オプション未選択を明示する表示はない。",
+      "error": null,
+      "goalPlannerMs": 11193,
+      "nextStepPlannerMs": 78883,
+      "plannerMs": 90076,
+      "verifierMs": 224404,
+      "verifierCalls": [
+        {
+          "model": "gpt-5.6-sol",
+          "durationMs": 13015,
+          "observationRevision": 151
+        },
+        {
+          "model": "gpt-5.6-sol",
+          "durationMs": 7556,
+          "observationRevision": 159
+        },
+        {
+          "model": "gpt-5.4",
+          "durationMs": 23562,
+          "observationRevision": 166
+        },
+        {
+          "model": "gpt-5.4",
+          "durationMs": 26646,
+          "observationRevision": 166
+        },
+        {
+          "model": "gpt-5.4",
+          "durationMs": 27836,
+          "observationRevision": 199
+        },
+        {
+          "model": "gpt-5.6-sol",
+          "durationMs": 13765,
+          "observationRevision": 223
+        },
+        {
+          "model": "gpt-5.4",
+          "durationMs": 25332,
+          "observationRevision": 225
+        },
+        {
+          "model": "gpt-5.6-sol",
+          "durationMs": 10645,
+          "observationRevision": 231
+        },
+        {
+          "model": "gpt-5.4",
+          "durationMs": 26031,
+          "observationRevision": 233
+        },
+        {
+          "model": "gpt-5.4",
+          "durationMs": 24314,
+          "observationRevision": 235
+        },
+        {
+          "model": "gpt-5.4",
+          "durationMs": 25702,
+          "observationRevision": 243
+        }
+      ],
+      "computerUseModelCalls": 114,
+      "computerUseModelMs": 469951,
+      "screenshotMs": 26711,
+      "browserSteps": 92,
+      "observations": 24,
+      "replans": 2,
+      "accountedMs": 811142,
+      "unaccountedMs": 99563.334989
+    }
+  ]
+}

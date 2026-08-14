@@ -17,6 +17,8 @@ Lexus公式サイトを左ペインの隔離ブラウザで表示し、右ペイ
 - 承認後も同じサブタスクとVerifierへ復帰するタスク継続
 - Plannerのゴール・サブタスク、構造化制約、Verifier根拠を展開できる処理ログ
 - ブラウザ画像取得の10秒タイムアウトと、停止・クラッシュ時のブラウザ自動再生成
+- 同一画面の画像・ページ本文を共有するタスク観測と、サブタスク・全ゴールを1回で判定する統合Verifier
+- Planner、Verifier、Computer Useのモデル待ち時間・呼び出し回数・画面取得時間の処理ログ
 - Microsoft Foundry Responses APIアダプターとDefaultAzureCredential認証
 - 手動・AI操作共通の閲覧・リンククリック履歴
 - 車種、ボディタイプ、パワートレインへの興味抽出と重複統合
@@ -62,12 +64,16 @@ AZURE_REALTIME_MODEL=gpt-realtime-2.1-mini
 AZURE_REALTIME_VOICE=alloy
 AZURE_EXPERT_MODEL=gpt-5.6-sol
 AZURE_CHAT_MODEL=gpt-5.4
+AZURE_TASK_PLANNER_MODEL=gpt-5.6-sol
+AZURE_TASK_VERIFIER_MODEL=gpt-5.6-sol
 AZURE_TRANSCRIPTION_MODEL=gpt-4o-mini-transcribe
 AZURE_SPEECH_MODEL=gpt-4o-mini-tts
 AZURE_SPEECH_VOICE=alloy
 ```
 
 APIキーは使用せず、`@azure/identity` の `DefaultAzureCredential` で `https://cognitiveservices.azure.com/.default` のトークンを取得します。ローカルではAzure CLI等でログインし、Azure上では最小権限のマネージドIDを割り当ててください。パスワード、トークン、APIキーは環境ファイルへ記載しないでください。
+
+`AZURE_TASK_PLANNER_MODEL` と `AZURE_TASK_VERIFIER_MODEL` を省略した場合は `AZURE_EXPERT_MODEL` を使用します。タスク処理ログには各モデルの所要時間が表示されるため、同じシナリオで速度と成功率を比較してからモデルを変更してください。
 
 音声モード開始時、`/api/realtime/session` がマネージドIDでセッション限定の短命client secretを発行します。ブラウザはその資格情報でFoundryへWebRTC接続し、音声、semantic VAD、字幕、応答、割り込みを同じ接続で処理します。単純な会話はRealtimeモデルが直接応答し、比較・推薦は高水準toolから `gpt-5.6-sol`、Web探索は検証済みのComputer Useループへ委譲します。Azureの長期資格情報と音声ファイルは保存・公開しません。
 
@@ -78,7 +84,33 @@ npm run dev    # 開発サーバー
 npm run build  # 本番ビルド
 npm run lint   # ESLint
 npm test       # Vitest
+npm run benchmark:task  # 起動済みアプリでタスクモードをライブ計測
 ```
+
+### タスクモードのライブ計測
+
+別のターミナルで`npm run dev`を起動してから、同じAzure設定を使って次を実行します。既定では1回のウォームアップ後に3回計測し、[scripts/task-scenarios.json](scripts/task-scenarios.json)のシナリオを順番に実行します。
+
+```bash
+npm run benchmark:task
+```
+
+短い動作確認や公開環境の計測では、環境変数で対象と回数を変更できます。
+
+```bash
+BENCHMARK_WARMUPS=0 BENCHMARK_RUNS=1 npm run benchmark:task
+BENCHMARK_BASE_URL=https://<container-app-host> BENCHMARK_RUNS=5 npm run benchmark:task
+```
+
+結果は既定で`benchmark-results/task-live.json`へ保存します。総所要時間のP50/P95/平均、成功率、Planner・Verifier・Computer Useの時間、モデル呼び出し回数、画面取得時間、計測内訳外の時間、操作数、再計画数を記録します。長時間試行では各API応答のログをIDで逐次収集するため、画面表示用ログの200件上限に影響されません。Verifierは同じ`observationRevision`のサブタスク・全ゴールログを1回として集計し、Computer Useは承認途中の累積ログを除いて実行チャンクごとの最終値を集計します。各試行前に未完了タスク、会話、処理ログを破棄して開始URLへ戻します。承認が必要な操作は既定では自動承認せず、停止時点までの部分計測を含む失敗として記録します。
+
+既知の非送信シナリオを無人実行する場合に限り、シナリオの`allowApprovals`と実行時の環境変数を両方指定します。問い合わせ送信、予約、購入など外部へ影響するシナリオには`allowApprovals`を設定しないでください。
+
+```bash
+BENCHMARK_APPROVE_ALLOWED_ACTIONS=1 BENCHMARK_WARMUPS=0 BENCHMARK_RUNS=1 npm run benchmark:task
+```
+
+主な設定値は`BENCHMARK_LIMIT`、`BENCHMARK_WARMUPS`、`BENCHMARK_RUNS`、`BENCHMARK_MAX_CONTINUATIONS`、`BENCHMARK_REQUEST_TIMEOUT_MS`、`BENCHMARK_BASE_URL`、`BENCHMARK_OUTPUT`、`BENCHMARK_APPROVE_ALLOWED_ACTIONS`です。同条件を保ったままタスク用モデルまたはContainer Apps revisionだけを変更し、速度と成功率を比較してください。
 
 ## Azure開発環境
 
@@ -116,10 +148,10 @@ Container Appはユーザー割り当てマネージドIDを使用し、AI Servi
 
 | 項目 | 値 |
 | --- | --- |
-| デプロイ日時 | 2026-08-13 11:25 UTC |
-| ACR image | `webpage-vision-agent:task-mode-guard-20260813112134-56cca8a` |
-| Image digest | `sha256:e8c6cf45fee9d64c9330b5f881b8bb0d61b3b8b1b6e43a14f7e3a10088e0f862` |
-| Container App revision | `ca-webpage-vision-agent-dev--0000023` |
+| デプロイ日時 | 2026-08-13 23:57 UTC |
+| ACR image | `webpage-vision-agent:model-retry-20260813235526-fb7b9a4` |
+| Image digest | `sha256:687bf5ffb90dbb02d8251c06da41c77560b60e44eb4cf828bee20389be952e01` |
+| Container App revision | `ca-webpage-vision-agent-dev--0000025` |
 | Traffic | 100% |
 
 デプロイ後にリビジョンが `Healthy` であること、公開トップページと `/api/session` がHTTP 200を返すこと、`agentMode` が `foundry` であることを確認済みです。
