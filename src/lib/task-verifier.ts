@@ -1,7 +1,9 @@
 import { z } from "zod";
-import { runWithTimeout } from "./abort-timeout";
 import { azureBearerToken } from "./azure-auth";
 import { browserManager, type TaskBrowserObservation } from "./browser";
+import { runModelOperation } from "./model-operation";
+
+const VERIFIER_TEXT_LIMIT = 3_000;
 
 export const taskConstraintSchema = z.object({
   id: z.string().trim().min(1).max(80),
@@ -73,7 +75,7 @@ JSON以外を出力せず、次の形式に厳密に従ってください: {"res
       input: [{
         role: "user",
         content: [
-          { type: "input_text", text: `検証制約:\n${JSON.stringify(constraints)}\n現在URL: ${pageContext.url}\nページ本文:\n${pageContext.text}` },
+          { type: "input_text", text: `検証制約:\n${JSON.stringify(constraints)}\n現在URL: ${pageContext.url}\nページ本文:\n${pageContext.text.slice(0, VERIFIER_TEXT_LIMIT)}` },
           { type: "input_image", image_url: `data:image/jpeg;base64,${image.toString("base64")}` },
         ],
       }],
@@ -88,16 +90,24 @@ JSON以外を出力せず、次の形式に厳密に従ってください: {"res
   return parseVerificationResult(text);
 }
 
+export function verifierConfig() {
+  return {
+    primary: process.env.AZURE_TASK_VERIFIER_MODEL ?? process.env.AZURE_EXPERT_MODEL ?? "gpt-5.6-sol",
+    fallback: process.env.AZURE_TASK_VERIFIER_FALLBACK_MODEL ?? process.env.AZURE_CHAT_MODEL ?? "gpt-5.4",
+    primaryTimeoutMs: 30_000,
+    fallbackTimeoutMs: 45_000,
+  };
+}
+
 export async function verifyTaskConstraints(constraints: TaskConstraint[], observation?: TaskBrowserObservation) {
-  const primary = process.env.AZURE_TASK_VERIFIER_MODEL ?? process.env.AZURE_EXPERT_MODEL ?? "gpt-5.6-sol";
-  const fallback = process.env.AZURE_CHAT_MODEL ?? "gpt-5.4";
+  const config = verifierConfig();
   const captured = observation ?? await browserManager.taskObservation(constraints.map((constraint) => constraint.description).join(" "));
   const startedAt = Date.now();
-  try {
-    const verification = await runWithTimeout(15_000, (signal) => requestVerification(primary, constraints, captured, signal));
-    return { ...verification, model: primary, durationMs: Date.now() - startedAt, observationRevision: captured.revision };
-  } catch {
-    const verification = await runWithTimeout(20_000, (signal) => requestVerification(fallback, constraints, captured, signal));
-    return { ...verification, model: fallback, durationMs: Date.now() - startedAt, observationRevision: captured.revision };
-  }
+  const verification = await runModelOperation({
+    operation: "Verifier",
+    primary: { model: config.primary, timeoutMs: config.primaryTimeoutMs },
+    fallback: { model: config.fallback, timeoutMs: config.fallbackTimeoutMs },
+    request: async (model, signal) => ({ ...await requestVerification(model, constraints, captured, signal), model }),
+  });
+  return { ...verification, durationMs: Date.now() - startedAt, observationRevision: captured.revision };
 }

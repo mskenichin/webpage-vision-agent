@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
+import { runHistoryRecorder } from "@/lib/run-history-recorder";
 import { store } from "@/lib/store";
 
 const profileSchema = z.object({
@@ -12,6 +13,7 @@ const profileSchema = z.object({
   passengers: z.number().int().min(1).max(20).optional(),
   priorities: z.string().max(200).optional(),
   activityCollection: z.boolean().optional(),
+  runHistoryCollection: z.boolean().optional(),
 });
 
 const operationSchema = z.discriminatedUnion("operation", [
@@ -28,6 +30,7 @@ export async function PUT(request: Request) {
   const parsed = profileSchema.safeParse(await request.json().catch(() => null));
   if (!parsed.success) return NextResponse.json({ code: "INVALID_PROFILE", issues: parsed.error.issues }, { status: 400 });
   store.updateProfile(parsed.data);
+  if (parsed.data.runHistoryCollection === false) await runHistoryRecorder.disableCollection();
   return NextResponse.json(store.snapshot());
 }
 

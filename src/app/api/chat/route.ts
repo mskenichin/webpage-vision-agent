@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import { runAgent, TASK_CONTINUATION_MESSAGE } from "@/lib/agent";
+import { agentErrorResponse } from "@/lib/agent-error";
 import { store } from "@/lib/store";
 
 export const runtime = "nodejs";
@@ -18,7 +19,7 @@ export async function POST(request: Request) {
 
   if (!parsed.data.continuation) store.addMessage("user", parsed.data.message);
   try {
-    const content = await runAgent(parsed.data.message, parsed.data.mode);
+    const content = await runAgent(parsed.data.message, parsed.data.mode, undefined, parsed.data.continuation);
     const taskContinuation = content === TASK_CONTINUATION_MESSAGE;
     if (!taskContinuation) store.addMessage("assistant", content);
     return NextResponse.json({ ...store.snapshot(), taskContinuation });
@@ -30,7 +31,8 @@ export async function POST(request: Request) {
       return NextResponse.json(store.snapshot());
     }
     store.addMessage("system", `操作を停止しました: ${message}`);
-    return NextResponse.json(store.snapshot(), { status: 502 });
+    const response = agentErrorResponse(error);
+    return NextResponse.json({ ...store.snapshot(), code: response.code, message: response.message }, { status: response.status });
   }
 }
 

@@ -65,7 +65,12 @@ AZURE_REALTIME_VOICE=alloy
 AZURE_EXPERT_MODEL=gpt-5.6-sol
 AZURE_CHAT_MODEL=gpt-5.4
 AZURE_TASK_PLANNER_MODEL=gpt-5.6-sol
-AZURE_TASK_VERIFIER_MODEL=gpt-5.6-sol
+AZURE_GOAL_PLANNER_MODEL=gpt-5.4
+AZURE_GOAL_PLANNER_FALLBACK_MODEL=gpt-5.6-sol
+AZURE_NEXT_STEP_PLANNER_MODEL=gpt-5.4
+AZURE_NEXT_STEP_PLANNER_FALLBACK_MODEL=gpt-5.6-sol
+AZURE_TASK_VERIFIER_MODEL=gpt-5.4
+AZURE_TASK_VERIFIER_FALLBACK_MODEL=gpt-5.6-sol
 AZURE_TRANSCRIPTION_MODEL=gpt-4o-mini-transcribe
 AZURE_SPEECH_MODEL=gpt-4o-mini-tts
 AZURE_SPEECH_VOICE=alloy
@@ -73,7 +78,7 @@ AZURE_SPEECH_VOICE=alloy
 
 APIキーは使用せず、`@azure/identity` の `DefaultAzureCredential` で `https://cognitiveservices.azure.com/.default` のトークンを取得します。ローカルではAzure CLI等でログインし、Azure上では最小権限のマネージドIDを割り当ててください。パスワード、トークン、APIキーは環境ファイルへ記載しないでください。
 
-`AZURE_TASK_PLANNER_MODEL` と `AZURE_TASK_VERIFIER_MODEL` を省略した場合は `AZURE_EXPERT_MODEL` を使用します。タスク処理ログには各モデルの所要時間が表示されるため、同じシナリオで速度と成功率を比較してからモデルを変更してください。
+`AZURE_TASK_PLANNER_MODEL` と `AZURE_TASK_VERIFIER_MODEL` を省略した場合は `AZURE_EXPERT_MODEL` を使用します。Goal Plannerは `AZURE_GOAL_PLANNER_MODEL`（省略時は `AZURE_CHAT_MODEL`）を30秒で呼び出し、失敗時は `AZURE_GOAL_PLANNER_FALLBACK_MODEL`（省略時は `AZURE_TASK_PLANNER_MODEL`）を45秒で呼び出します。Next-Step Plannerは `AZURE_NEXT_STEP_PLANNER_MODEL`（省略時は `AZURE_CHAT_MODEL`）を30秒で呼び出し、失敗時は `AZURE_NEXT_STEP_PLANNER_FALLBACK_MODEL`（省略時は `AZURE_TASK_PLANNER_MODEL`）を45秒で呼び出します。Verifierも一次モデルを30秒で呼び出し、失敗時は `AZURE_TASK_VERIFIER_FALLBACK_MODEL`（省略時は `AZURE_CHAT_MODEL`）を45秒で呼び出します。タスク処理ログには各モデルの所要時間が表示されるため、同じシナリオで速度と成功率を比較してからモデルを変更してください。
 
 音声モード開始時、`/api/realtime/session` がマネージドIDでセッション限定の短命client secretを発行します。ブラウザはその資格情報でFoundryへWebRTC接続し、音声、semantic VAD、字幕、応答、割り込みを同じ接続で処理します。単純な会話はRealtimeモデルが直接応答し、比較・推薦は高水準toolから `gpt-5.6-sol`、Web探索は検証済みのComputer Useループへ委譲します。Azureの長期資格情報と音声ファイルは保存・公開しません。
 

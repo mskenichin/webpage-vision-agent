@@ -2,12 +2,12 @@
 
 import {
   ArrowLeft, ArrowRight, Bot, ChevronDown, ChevronRight, History, LoaderCircle, Mic, MicOff, PanelRight,
-  ListChecks, MessageSquare, RefreshCw, ScrollText, Send, ShieldAlert, SlidersHorizontal, Sparkles, Square, Trash2, UserRound,
+  ListChecks, MessageSquare, Play, RefreshCw, ScrollText, Send, ShieldAlert, SlidersHorizontal, Sparkles, Square, Trash2, UserRound,
   Volume2, VolumeX, X,
 } from "lucide-react";
-import { FormEvent, useEffect, useRef, useState } from "react";
+import { FormEvent, useEffect, useEffectEvent, useRef, useState } from "react";
 import { displayPointToFrame, type FrameSize } from "@/lib/browser-frame";
-import type { AppState, BrowserAction, ExecutionMode, PageContext, Profile } from "@/lib/domain";
+import type { AgentRunHistory, AgentRunHistorySummary, AppState, BrowserAction, ExecutionMode, PageContext, Profile, ReplayResult } from "@/lib/domain";
 import { realtimeInstructions } from "@/lib/realtime-instructions";
 
 const statusLabels: Record<AppState["browserStatus"], string> = {
@@ -52,6 +52,9 @@ export default function Home() {
   const [executionMode, setExecutionMode] = useState<ExecutionMode>("normal");
   const [logsVisible, setLogsVisible] = useState(false);
   const [profileOpen, setProfileOpen] = useState(false);
+  const [runHistories, setRunHistories] = useState<AgentRunHistorySummary[]>([]);
+  const [selectedRun, setSelectedRun] = useState<AgentRunHistory | null>(null);
+  const [historyBusy, setHistoryBusy] = useState(false);
   const [mobilePane, setMobilePane] = useState<"web" | "chat">("web");
   const [error, setError] = useState("");
   const microphoneRef = useRef<MediaStream | null>(null);
@@ -76,6 +79,7 @@ export default function Home() {
   const pageContextRef = useRef<PageContext | undefined>(undefined);
   const inputTranscriptDeltaRef = useRef("");
   const outputTranscriptDeltaRef = useRef("");
+  const loadRunHistoriesEvent = useEffectEvent(loadRunHistories);
 
   useEffect(() => {
     let active = true;
@@ -226,6 +230,17 @@ export default function Home() {
   useEffect(() => {
     stateRef.current = state;
   }, [state]);
+
+  // Replay is server-driven, so refresh the frame each step because the screencast can stall across navigations.
+  useEffect(() => {
+    const status = state?.replay?.status;
+    if (status === "running" || status === "falling_back") setFrame((value) => value + 1);
+  }, [state?.replay?.currentStep, state?.replay?.status]);
+
+  useEffect(() => {
+    if (!profileOpen) return;
+    void loadRunHistoriesEvent();
+  }, [profileOpen]);
 
   async function refreshState() {
     const next = await jsonRequest<AppState>("/api/session");
@@ -704,6 +719,72 @@ export default function Home() {
     }));
   }
 
+  async function loadRunHistories() {
+    try {
+      const result = await jsonRequest<{ runs: AgentRunHistorySummary[] }>("/api/run-history", { cache: "no-store" });
+      setRunHistories(result.runs);
+      if (selectedRun && !result.runs.some((run) => run.id === selectedRun.id)) setSelectedRun(null);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "操作履歴を取得できませんでした。");
+    }
+  }
+
+  async function selectRunHistory(runId: string) {
+    setHistoryBusy(true);
+    try {
+      const result = await jsonRequest<{ run: AgentRunHistory }>(`/api/run-history/${encodeURIComponent(runId)}`, { cache: "no-store" });
+      setSelectedRun(result.run);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "操作履歴の詳細を取得できませんでした。");
+    } finally {
+      setHistoryBusy(false);
+    }
+  }
+
+  async function replayHistory(runId: string) {
+    setHistoryBusy(true);
+    setBrowserBusy(true);
+    setError("");
+    try {
+      await jsonRequest<ReplayResult>(`/api/run-history/${encodeURIComponent(runId)}/replay`, { method: "POST" });
+      await refreshState();
+      await loadRunHistories();
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "操作履歴をリプレイできませんでした。");
+      await refreshState().catch(() => undefined);
+    } finally {
+      setHistoryBusy(false);
+      setBrowserBusy(false);
+    }
+  }
+
+  async function stopHistoryReplay(runId: string) {
+    await jsonRequest(`/api/run-history/${encodeURIComponent(runId)}/replay`, { method: "DELETE" });
+    await refreshState();
+  }
+
+  async function deleteRunHistory(runId: string) {
+    setHistoryBusy(true);
+    try {
+      await jsonRequest(`/api/run-history/${encodeURIComponent(runId)}`, { method: "DELETE" });
+      if (selectedRun?.id === runId) setSelectedRun(null);
+      await loadRunHistories();
+    } finally {
+      setHistoryBusy(false);
+    }
+  }
+
+  async function clearRunHistories() {
+    setHistoryBusy(true);
+    try {
+      await jsonRequest("/api/run-history", { method: "DELETE" });
+      setSelectedRun(null);
+      await loadRunHistories();
+    } finally {
+      setHistoryBusy(false);
+    }
+  }
+
   return (
     <main className="app-shell">
       <header className="topbar">
@@ -861,6 +942,49 @@ export default function Home() {
                 <label className="collection-toggle"><input type="checkbox" checked={state.profile.activityCollection} onChange={(event) => void updateProfile({ activityCollection: event.target.checked })} /><span><strong>閲覧履歴をプロファイルに反映</strong><small>ページとリンクの履歴から興味を自動更新します</small></span></label>
                 <div className="activity-list">{state.activity.slice(0, 8).map((activity) => <div key={activity.id}><span>{activity.type === "page_viewed" ? "閲覧" : "クリック"} · {activity.actor === "agent" ? "AI" : "手動"}</span><strong>{activity.title || activity.url}</strong></div>)}</div>
                 {state.activity.length > 0 && <button className="danger-button" onClick={() => void profileOperation({ operation: "clear_activity" })}><Trash2 size={15} />履歴と興味を削除</button>}
+              </section>
+
+              <section className="profile-section">
+                <div className="section-title"><Play size={17} /><h3>操作リプレイ</h3><span>{runHistories.length}</span></div>
+                <label className="collection-toggle"><input type="checkbox" checked={state.profile.runHistoryCollection} onChange={(event) => void updateProfile({ runHistoryCollection: event.target.checked }).catch((cause) => setError(cause instanceof Error ? cause.message : "設定を更新できませんでした。"))} /><span><strong>AI操作の履歴を保存</strong><small>URL、操作内容、位置を保存し、同じ操作を高速に再現します</small></span></label>
+                {state.replay && ["running", "falling_back"].includes(state.replay.status) && (
+                  <div className="replay-progress" role="status">
+                    <div><LoaderCircle size={15} className="spin" /><strong>{state.replay.status === "falling_back" ? "AIへ引き継ぎ中" : `リプレイ ${state.replay.currentStep}/${state.replay.totalSteps}`}</strong></div>
+                    {state.replay.message && <span>{state.replay.message}</span>}
+                    <button type="button" onClick={() => void stopHistoryReplay(state.replay!.runId)}><Square size={13} fill="currentColor" />停止</button>
+                  </div>
+                )}
+                <div className="run-history-list">
+                  {runHistories.length === 0 && <p className="empty-copy">保存されたAI操作はまだありません。</p>}
+                  {runHistories.map((run) => {
+                    const isReplaying = state.replay?.runId === run.id && ["running", "falling_back"].includes(state.replay.status);
+                    return (
+                    <div className={`run-history-row ${selectedRun?.id === run.id ? "selected" : ""} ${isReplaying ? "replaying" : ""}`} key={run.id}>
+                      <button type="button" className="run-history-select" onClick={() => void selectRunHistory(run.id)}>
+                        <span>{new Date(run.startedAt).toLocaleString("ja-JP")} · {run.actionCount}操作</span>
+                        <strong>{run.prompt}</strong>
+                        {isReplaying
+                          ? <small className="run-history-replaying"><LoaderCircle size={11} className="spin" />{state.replay!.status === "falling_back" ? "AIへ引き継ぎ中…" : `リプレイ中 ${state.replay!.currentStep}/${state.replay!.totalSteps}`}</small>
+                          : <small>{run.replayable ? "リプレイ可能" : run.reason ?? "リプレイ不可"}</small>}
+                      </button>
+                      <button type="button" className="run-history-delete" title="この操作履歴を削除" disabled={historyBusy} onClick={() => void deleteRunHistory(run.id)}><Trash2 size={15} /></button>
+                    </div>
+                    );
+                  })}
+                </div>
+                {selectedRun && (
+                  <div className="run-history-detail">
+                    <div className="run-history-path"><span>開始</span><strong>{selectedRun.startUrl}</strong><span>終了</span><strong>{selectedRun.endUrl ?? "未完了"}</strong></div>
+                    <button type="button" className="replay-button" disabled={!selectedRun.replayable || historyBusy || Boolean(state.replay && ["running", "falling_back"].includes(state.replay.status))} onClick={() => void replayHistory(selectedRun.id)}><Play size={15} fill="currentColor" />この履歴をリプレイ</button>
+                    <ol>
+                      {selectedRun.actions.map((action) => {
+                        const isActiveStep = Boolean(state.replay && state.replay.runId === selectedRun.id && ["running", "falling_back"].includes(state.replay.status) && state.replay.currentStep === action.sequence);
+                        return <li key={action.id} className={isActiveStep ? "active-step" : ""} aria-current={isActiveStep ? "step" : undefined}><span>{action.sequence}. {action.type}</span><strong>{action.target?.label || action.url || action.key || "ブラウザー操作"}</strong><small>{action.x !== undefined && action.y !== undefined ? `位置 ${Math.round(action.x)}, ${Math.round(action.y)}` : action.deltaY !== undefined ? `スクロール ${action.deltaY}` : action.afterUrl}</small></li>;
+                      })}
+                    </ol>
+                  </div>
+                )}
+                {runHistories.length > 0 && <button className="danger-button" disabled={historyBusy} onClick={() => void clearRunHistories()}><Trash2 size={15} />操作履歴をすべて削除</button>}
               </section>
             </div>
           </section>

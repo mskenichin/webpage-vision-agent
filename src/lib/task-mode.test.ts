@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { combineTaskConstraints, normalizeStepConstraintIds, parseNextTaskStep, parseTaskPlan, taskExecutionGoal, taskStepExecutionGoal, type TaskStep } from "./task-mode";
+import { combineTaskConstraints, goalPlannerConfig, nextStepPlannerConfig, normalizeStepConstraintIds, parseNextTaskStep, parseTaskPlan, taskExecutionGoal, taskStepExecutionGoal, type TaskStep } from "./task-mode";
 
 function step(id: string, instruction: string, description: string): TaskStep {
   return {
@@ -16,6 +16,46 @@ function step(id: string, instruction: string, description: string): TaskStep {
 }
 
 describe("task mode planning", () => {
+  it("uses the dedicated fast model and extended timeouts for goal planning", () => {
+    const previousPrimary = process.env.AZURE_GOAL_PLANNER_MODEL;
+    const previousFallback = process.env.AZURE_GOAL_PLANNER_FALLBACK_MODEL;
+    process.env.AZURE_GOAL_PLANNER_MODEL = "fast-model";
+    process.env.AZURE_GOAL_PLANNER_FALLBACK_MODEL = "quality-model";
+    try {
+      expect(goalPlannerConfig()).toEqual({
+        primary: "fast-model",
+        fallback: "quality-model",
+        primaryTimeoutMs: 30_000,
+        fallbackTimeoutMs: 45_000,
+      });
+    } finally {
+      if (previousPrimary === undefined) delete process.env.AZURE_GOAL_PLANNER_MODEL;
+      else process.env.AZURE_GOAL_PLANNER_MODEL = previousPrimary;
+      if (previousFallback === undefined) delete process.env.AZURE_GOAL_PLANNER_FALLBACK_MODEL;
+      else process.env.AZURE_GOAL_PLANNER_FALLBACK_MODEL = previousFallback;
+    }
+  });
+
+  it("uses the dedicated fast model and extended timeouts for next-step planning", () => {
+    const previousPrimary = process.env.AZURE_NEXT_STEP_PLANNER_MODEL;
+    const previousFallback = process.env.AZURE_NEXT_STEP_PLANNER_FALLBACK_MODEL;
+    process.env.AZURE_NEXT_STEP_PLANNER_MODEL = "fast-model";
+    process.env.AZURE_NEXT_STEP_PLANNER_FALLBACK_MODEL = "quality-model";
+    try {
+      expect(nextStepPlannerConfig()).toEqual({
+        primary: "fast-model",
+        fallback: "quality-model",
+        primaryTimeoutMs: 30_000,
+        fallbackTimeoutMs: 45_000,
+      });
+    } finally {
+      if (previousPrimary === undefined) delete process.env.AZURE_NEXT_STEP_PLANNER_MODEL;
+      else process.env.AZURE_NEXT_STEP_PLANNER_MODEL = previousPrimary;
+      if (previousFallback === undefined) delete process.env.AZURE_NEXT_STEP_PLANNER_FALLBACK_MODEL;
+      else process.env.AZURE_NEXT_STEP_PLANNER_FALLBACK_MODEL = previousFallback;
+    }
+  });
+
   it("parses goal constraints without predicting future UI steps", () => {
     const plan = parseTaskPlan(`\`\`\`json
       {"summary":"ISの見積もりを作成する","goalConstraints":[{"id":"grade-selected","target":{"kind":"selection","label":"グレード"},"operator":"equals","expected":"F SPORT","evidence":["screenshot"],"description":"選択中グレードがF SPORT"},{"id":"estimate-visible","target":{"kind":"page","label":"見積金額"},"operator":"visible","evidence":["screenshot","page_text"],"description":"見積金額が表示されている"}]}

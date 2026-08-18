@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { failedConstraintResults, parseVerificationResult, type TaskConstraint } from "./task-verifier";
+import { failedConstraintResults, parseVerificationResult, verifierConfig, type TaskConstraint } from "./task-verifier";
 
 const constraints: TaskConstraint[] = [
   {
@@ -21,6 +21,26 @@ const constraints: TaskConstraint[] = [
 ];
 
 describe("task verifier", () => {
+  it("uses the dedicated models with 30 and 45 second timeouts", () => {
+    const previousPrimary = process.env.AZURE_TASK_VERIFIER_MODEL;
+    const previousFallback = process.env.AZURE_TASK_VERIFIER_FALLBACK_MODEL;
+    process.env.AZURE_TASK_VERIFIER_MODEL = "fast-model";
+    process.env.AZURE_TASK_VERIFIER_FALLBACK_MODEL = "quality-model";
+    try {
+      expect(verifierConfig()).toEqual({
+        primary: "fast-model",
+        fallback: "quality-model",
+        primaryTimeoutMs: 30_000,
+        fallbackTimeoutMs: 45_000,
+      });
+    } finally {
+      if (previousPrimary === undefined) delete process.env.AZURE_TASK_VERIFIER_MODEL;
+      else process.env.AZURE_TASK_VERIFIER_MODEL = previousPrimary;
+      if (previousFallback === undefined) delete process.env.AZURE_TASK_VERIFIER_FALLBACK_MODEL;
+      else process.env.AZURE_TASK_VERIFIER_FALLBACK_MODEL = previousFallback;
+    }
+  });
+
   it("parses structured constraint results", () => {
     expect(parseVerificationResult(`\`\`\`json
       {"results":[{"id":"grade","passed":true,"evidence":"F SPORTに選択表示"}]}

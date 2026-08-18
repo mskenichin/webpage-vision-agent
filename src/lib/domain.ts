@@ -21,6 +21,89 @@ export interface Profile {
   passengers: number;
   priorities: string;
   activityCollection: boolean;
+  runHistoryCollection: boolean;
+}
+
+export type RecordedActionType = Exclude<BrowserAction["type"], "type">;
+
+export interface ElementFingerprint {
+  tag: string;
+  label?: string;
+  href?: string;
+}
+
+export interface ElementLocator {
+  tag: string;
+  role?: string;
+  name?: string;
+  testId?: string;
+  elementId?: string;
+  fieldName?: string;
+  href?: string;
+  text?: string;
+  nth?: number;
+  inDialog?: boolean;
+}
+
+export interface RecordedBrowserAction {
+  id: string;
+  sequence: number;
+  type: RecordedActionType;
+  x?: number;
+  y?: number;
+  deltaY?: number;
+  key?: string;
+  url?: string;
+  beforeUrl: string;
+  afterUrl: string;
+  beforeFrameRevision: number;
+  afterFrameRevision: number;
+  target?: ElementFingerprint;
+  locator?: ElementLocator;
+  startedAt: string;
+  completedAt: string;
+}
+
+export type AgentRunHistoryStatus = "running" | "completed" | "failed" | "stopped";
+
+export interface AgentRunHistory {
+  id: string;
+  prompt: string;
+  executionMode: ExecutionMode;
+  startedAt: string;
+  completedAt?: string;
+  startUrl: string;
+  endUrl?: string;
+  status: AgentRunHistoryStatus;
+  reason?: string;
+  containsTextInput: boolean;
+  replayable: boolean;
+  fallbackFromRunId?: string;
+  schemaVersion?: number;
+  actions: RecordedBrowserAction[];
+}
+
+export interface AgentRunHistorySummary extends Omit<AgentRunHistory, "actions"> {
+  actionCount: number;
+}
+
+export type ReplayStatus = "idle" | "running" | "falling_back" | "completed" | "failed" | "stopped";
+
+export interface ReplayProgress {
+  runId: string;
+  status: ReplayStatus;
+  currentStep: number;
+  totalSteps: number;
+  currentAction?: RecordedActionType;
+  message?: string;
+}
+
+export interface ReplayResult {
+  ok: boolean;
+  status: Exclude<ReplayStatus, "idle" | "running">;
+  completedSteps: number;
+  reason?: string;
+  fallbackRunId?: string;
 }
 
 export interface ActivityEvent {
@@ -88,6 +171,7 @@ export interface AppState {
   processLogs: ProcessLog[];
   approval: ApprovalRequest | null;
   agentMode: "foundry" | "demo";
+  replay: ReplayProgress | null;
 }
 
 export interface BrowserAction {

@@ -156,6 +156,10 @@ async function runLoop(goal: string, progress: RunProgress, signal: AbortSignal)
       if (repetitions >= 3) throw new Error("COMPUTER_USE_REPEATED_ACTION");
       const remainingActions = computerActionsWithinLimit(result.actions, progress.steps);
       for (const action of remainingActions) {
+        if (action.type === "type" && ((action.text ?? "").trim().length === 0 || !(await browserManager.canAcceptTextInput()))) {
+          store.addProcessLog("browser", "info", "不要な文字入力をスキップしました", "編集可能な入力欄が対象ではありません");
+          continue;
+        }
         store.addProcessLog("browser", "info", `Computer Useステップ ${progress.steps + 1}`, actionDescription(action));
         await browserManager.execute(action, crypto.randomUUID());
         progress.steps += 1;

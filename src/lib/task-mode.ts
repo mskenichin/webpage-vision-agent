@@ -1,9 +1,9 @@
 import { z } from "zod";
-import { runWithTimeout } from "./abort-timeout";
 import { azureBearerToken } from "./azure-auth";
 import { browserManager, type TaskBrowserObservation } from "./browser";
 import { browserTaskRequest, runBrowserTask } from "./browser-task";
 import type { ApprovalRequest } from "./domain";
+import { runModelOperation } from "./model-operation";
 import { store } from "./store";
 import { failedConstraintResults, taskConstraintSchema, verifyTaskConstraints } from "./task-verifier";
 
@@ -229,34 +229,48 @@ JSON以外を出力せず、次の形式に厳密に従ってください: {"id"
   return parseNextTaskStep(text);
 }
 
+export function goalPlannerConfig() {
+  return {
+    primary: process.env.AZURE_GOAL_PLANNER_MODEL ?? process.env.AZURE_CHAT_MODEL ?? "gpt-5.4",
+    fallback: process.env.AZURE_GOAL_PLANNER_FALLBACK_MODEL
+      ?? process.env.AZURE_TASK_PLANNER_MODEL
+      ?? process.env.AZURE_EXPERT_MODEL
+      ?? "gpt-5.6-sol",
+    primaryTimeoutMs: 30_000,
+    fallbackTimeoutMs: 45_000,
+  };
+}
+
 export async function createTaskPlan(goal: string) {
-  const primary = process.env.AZURE_TASK_PLANNER_MODEL ?? process.env.AZURE_EXPERT_MODEL ?? "gpt-5.6-sol";
-  const fallback = process.env.AZURE_CHAT_MODEL ?? "gpt-5.4";
-  const startedAt = Date.now();
-  try {
-    const plan = await runWithTimeout(15_000, (signal) => requestPlanFromModel(primary, goal, signal));
-    store.addProcessLog("agent", "info", `Goal Planner: ${Date.now() - startedAt}ms`, primary);
-    return plan;
-  } catch {
-    const plan = await runWithTimeout(20_000, (signal) => requestPlanFromModel(fallback, goal, signal));
-    store.addProcessLog("agent", "info", `Goal Planner: ${Date.now() - startedAt}ms`, `${primary}から${fallback}へフォールバック`);
-    return plan;
-  }
+  const config = goalPlannerConfig();
+  return runModelOperation({
+    operation: "Goal Planner",
+    primary: { model: config.primary, timeoutMs: config.primaryTimeoutMs },
+    fallback: { model: config.fallback, timeoutMs: config.fallbackTimeoutMs },
+    request: (model, signal) => requestPlanFromModel(model, goal, signal),
+  });
+}
+
+export function nextStepPlannerConfig() {
+  return {
+    primary: process.env.AZURE_NEXT_STEP_PLANNER_MODEL ?? process.env.AZURE_CHAT_MODEL ?? "gpt-5.4",
+    fallback: process.env.AZURE_NEXT_STEP_PLANNER_FALLBACK_MODEL
+      ?? process.env.AZURE_TASK_PLANNER_MODEL
+      ?? process.env.AZURE_EXPERT_MODEL
+      ?? "gpt-5.6-sol",
+    primaryTimeoutMs: 30_000,
+    fallbackTimeoutMs: 45_000,
+  };
 }
 
 async function createNextTaskStep(task: ActiveTask) {
-  const primary = process.env.AZURE_TASK_PLANNER_MODEL ?? process.env.AZURE_EXPERT_MODEL ?? "gpt-5.6-sol";
-  const fallback = process.env.AZURE_CHAT_MODEL ?? "gpt-5.4";
-  const startedAt = Date.now();
-  try {
-    const step = await runWithTimeout(15_000, (signal) => requestNextStepFromModel(primary, task, signal));
-    store.addProcessLog("agent", "info", `Next-Step Planner: ${Date.now() - startedAt}ms`, primary);
-    return step;
-  } catch {
-    const step = await runWithTimeout(20_000, (signal) => requestNextStepFromModel(fallback, task, signal));
-    store.addProcessLog("agent", "info", `Next-Step Planner: ${Date.now() - startedAt}ms`, `${primary}から${fallback}へフォールバック`);
-    return step;
-  }
+  const config = nextStepPlannerConfig();
+  return runModelOperation({
+    operation: "Next-Step Planner",
+    primary: { model: config.primary, timeoutMs: config.primaryTimeoutMs },
+    fallback: { model: config.fallback, timeoutMs: config.fallbackTimeoutMs },
+    request: (model, signal) => requestNextStepFromModel(model, task, signal),
+  });
 }
 
 function isAwaitingApproval(result: unknown): result is { awaitingApproval: true } {

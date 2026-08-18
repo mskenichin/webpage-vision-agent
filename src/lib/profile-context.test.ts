@@ -12,6 +12,7 @@ const profile: Profile = {
   passengers: 5,
   priorities: "安全性、燃費",
   activityCollection: true,
+  runHistoryCollection: true,
 };
 
 function interest(name: string, score: number, category: Interest["category"] = "model"): Interest {

@@ -1,6 +1,7 @@
-import { chromium, type Browser, type BrowserContext, type CDPSession, type Page } from "playwright";
-import type { Actor, BrowserAction, PageContext } from "./domain";
+import { chromium, type Browser, type BrowserContext, type CDPSession, type Locator, type Page } from "playwright";
+import type { Actor, BrowserAction, ElementFingerprint, ElementLocator, PageContext } from "./domain";
 import { normalizePageText } from "./page-context";
+import { runHistoryRecorder } from "./run-history-recorder";
 import { store } from "./store";
 
 const START_URL = "https://lexus.jp/";
@@ -19,6 +20,11 @@ export interface TaskBrowserObservation {
   pageContext: PageContext;
   revision: number;
   capturedAt: string;
+}
+
+export interface BrowserExecutionOptions {
+  recordHistory?: boolean;
+  recordActivity?: boolean;
 }
 
 export function isAllowedUrl(value: string) {
@@ -85,9 +91,33 @@ class BrowserManager {
   private activeActor: Actor = "user";
   private activeOperationId = crypto.randomUUID();
   private lastMutationAt = 0;
+  private suppressActivity = false;
 
   currentRevision() {
     return this.frameRevision;
+  }
+
+  async elementFingerprint(x: number, y: number): Promise<ElementFingerprint | undefined> {
+    return this.serialize(async () => {
+      await this.start();
+      if (!this.page) return undefined;
+      return this.page.evaluate(({ pointX, pointY }) => {
+        const element = document.elementFromPoint(pointX, pointY);
+        if (!(element instanceof Element)) return undefined;
+        const control = element.closest("button, a, input, select, textarea, [role=button]") ?? element;
+        const anchor = control.closest("a");
+        const label = [
+          control.getAttribute("aria-label"),
+          control.getAttribute("title"),
+          control.textContent,
+        ].filter(Boolean).join(" ").trim().replace(/\s+/g, " ").slice(0, 160);
+        return {
+          tag: control.tagName.toLocaleLowerCase(),
+          ...(label ? { label } : {}),
+          ...(anchor instanceof HTMLAnchorElement ? { href: anchor.href } : {}),
+        };
+      }, { pointX: x, pointY: y });
+    });
   }
 
   private async serialize<T>(operation: () => Promise<T>) {
@@ -127,6 +157,7 @@ class BrowserManager {
       this.page = await this.context.newPage();
       this.page.on("framenavigated", (frame) => {
         if (frame !== this.page?.mainFrame()) return;
+        if (this.suppressActivity) return;
         const url = frame.url();
         if (!isAllowedUrl(url)) return;
         void this.recordPageView(url, this.activeActor, `${this.activeOperationId}:view`);
@@ -203,7 +234,7 @@ class BrowserManager {
         await new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
       }).catch(() => undefined);
       const [image, text, title] = await Promise.all([
-        page.screenshot({ type: "jpeg", quality: 72, animations: "disabled", timeout: 10_000 }),
+        page.screenshot({ type: "jpeg", quality: 55, animations: "disabled", timeout: 10_000 }),
         page.evaluate(() => (document.querySelector("main") ?? document.body)?.innerText ?? ""),
         page.title().catch(() => "Lexus"),
       ]);
@@ -218,6 +249,130 @@ class BrowserManager {
         revision: this.frameRevision,
         capturedAt: new Date().toISOString(),
       };
+    });
+  }
+
+  async settle(timeoutMs = 5_000) {
+    return this.serialize(async () => {
+      if (!this.page) return;
+      await this.page.waitForLoadState("domcontentloaded", { timeout: timeoutMs }).catch(() => undefined);
+      const stabilizationDelay = remainingStabilizationDelay(this.lastMutationAt);
+      if (stabilizationDelay > 0) await this.page.waitForTimeout(stabilizationDelay);
+      await this.page.evaluate(async () => {
+        await document.fonts.ready;
+        await new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
+      }).catch(() => undefined);
+      store.setBrowser("ready", this.page.url());
+    });
+  }
+
+  async locateByFingerprint(target: ElementFingerprint) {
+    return this.serialize(async () => {
+      await this.start();
+      if (!this.page) return null;
+      return this.page.evaluate((fingerprint) => {
+        const collapse = (value: string) => value.trim().replace(/\s+/g, " ");
+        const normalizeLabel = (value: string) => collapse(value).toLocaleLowerCase();
+        const normalizeUrl = (value: string) => {
+          try {
+            const url = new URL(value, location.href);
+            url.hash = "";
+            return url.href.replace(/\/$/, "");
+          } catch {
+            return "";
+          }
+        };
+        const expectedLabel = fingerprint.label ? normalizeLabel(fingerprint.label) : null;
+        const expectedUrl = fingerprint.href ? normalizeUrl(fingerprint.href) : null;
+        const match = [...document.querySelectorAll(fingerprint.tag)].find((element) => {
+          if (!(element instanceof HTMLElement)) return false;
+          const rect = element.getBoundingClientRect();
+          if (element.offsetParent === null || rect.width === 0 || rect.height === 0) return false;
+          if (expectedUrl !== null) {
+            const anchor = element.closest("a");
+            const href = anchor instanceof HTMLAnchorElement ? anchor.href : "";
+            if (!href || normalizeUrl(href) !== expectedUrl) return false;
+          }
+          if (expectedLabel !== null) {
+            const label = [
+              element.getAttribute("aria-label"),
+              element.getAttribute("title"),
+              element.textContent,
+            ].filter(Boolean).join(" ").trim().replace(/\s+/g, " ").slice(0, 160);
+            if (normalizeLabel(label) !== expectedLabel) return false;
+          }
+          return true;
+        });
+        if (!(match instanceof HTMLElement)) return null;
+        match.scrollIntoView({ block: "center", inline: "nearest" });
+        const rect = match.getBoundingClientRect();
+        const x = rect.left + rect.width / 2;
+        const y = rect.top + rect.height / 2;
+        if (x < 0 || y < 0 || x > innerWidth || y > innerHeight) return null;
+        const hit = document.elementFromPoint(x, y);
+        if (!hit || (hit !== match && !match.contains(hit))) return null;
+        return { x, y };
+      }, target);
+    });
+  }
+
+  async canAcceptTextInput() {
+    await this.start();
+    if (!this.page) return false;
+    return this.page.evaluate(() => {
+      const element = document.activeElement;
+      if (!(element instanceof HTMLElement)) return false;
+      if (element.isContentEditable) return true;
+      const tag = element.tagName.toLowerCase();
+      if (tag === "textarea") return true;
+      if (element instanceof HTMLInputElement) {
+        return !["button", "submit", "reset", "checkbox", "radio", "range", "color", "file", "image", "hidden"].includes(element.type);
+      }
+      return element.getAttribute("role") === "textbox";
+    });
+  }
+
+  async clickByLocator(locator: ElementLocator, actionType: "click" | "double_click", timeoutMs = 4_000) {
+    return this.serialize(async () => {
+      await this.start();
+      if (!this.page) return false;
+      const page = this.page;
+      const candidates: Locator[] = [];
+      if (locator.testId) candidates.push(page.locator(`[data-testid=${JSON.stringify(locator.testId)}]`));
+      if (locator.elementId) candidates.push(page.locator(`[id=${JSON.stringify(locator.elementId)}]`));
+      if (locator.role && locator.name) {
+        try {
+          candidates.push(page.getByRole(locator.role as Parameters<Page["getByRole"]>[0], { name: locator.name }));
+        } catch {
+          // invalid role string; skip role strategy
+        }
+      }
+      if (locator.href) {
+        candidates.push(page.locator(`a[href=${JSON.stringify(locator.href)}]`));
+        try {
+          const parsed = new URL(locator.href);
+          const relative = `${parsed.pathname}${parsed.search}`;
+          if (relative && relative !== locator.href) candidates.push(page.locator(`a[href=${JSON.stringify(relative)}]`));
+        } catch {
+          // non-absolute href; the exact selector above is sufficient
+        }
+      }
+      if (locator.name) candidates.push(page.getByText(locator.name, { exact: false }));
+      for (const base of candidates) {
+        try {
+          const count = await base.count();
+          if (count === 0) continue;
+          const target = count > 1 ? base.nth(Math.min(locator.nth ?? 0, count - 1)) : base.first();
+          if (actionType === "double_click") await target.dblclick({ timeout: timeoutMs });
+          else await target.click({ timeout: timeoutMs });
+          this.frameRevision += 1;
+          store.setBrowser("ready", page.url());
+          return true;
+        } catch {
+          // try next strategy
+        }
+      }
+      return false;
     });
   }
 
@@ -376,7 +531,12 @@ class BrowserManager {
     return target ? actionRisk(target.label, target.inputType) : null;
   }
 
-  async execute(action: BrowserAction, operationId = crypto.randomUUID(), expectedFrameRevision?: number) {
+  async execute(
+    action: BrowserAction,
+    operationId = crypto.randomUUID(),
+    expectedFrameRevision?: number,
+    options: BrowserExecutionOptions = {},
+  ) {
     return this.serialize(async () => {
       await this.start();
       if (!this.page) throw new Error("Browser session is not available");
@@ -387,6 +547,102 @@ class BrowserManager {
       this.activeActor = action.actor;
       this.activeOperationId = operationId;
       store.setBrowser(action.actor === "agent" ? "agent_running" : "user_controlled");
+      const beforeUrl = this.page.url();
+      const beforeFrameRevision = this.frameRevision;
+      const startedAt = new Date().toISOString();
+      const previousSuppressActivity = this.suppressActivity;
+      this.suppressActivity = options.recordActivity === false;
+      let target: ElementFingerprint | undefined;
+      let locator: ElementLocator | undefined;
+      if (action.actor === "agent" && ["click", "double_click"].includes(action.type)) {
+        const captured = await this.page.evaluate(({ x, y }) => {
+          const element = document.elementFromPoint(x, y);
+          if (!(element instanceof Element)) return undefined;
+          const control = element.closest("button, a, input, select, textarea, [role], summary, label") ?? element;
+          const anchor = control.closest("a");
+          const collapse = (value: string) => value.trim().replace(/\s+/g, " ");
+          const label = [
+            control.getAttribute("aria-label"),
+            control.getAttribute("title"),
+            control.textContent,
+          ].filter(Boolean).join(" ").trim().replace(/\s+/g, " ").slice(0, 160);
+          const tag = control.tagName.toLocaleLowerCase();
+          const implicitRole = () => {
+            const explicit = control.getAttribute("role");
+            if (explicit) return explicit;
+            if (anchor instanceof HTMLAnchorElement && anchor === control) return "link";
+            if (tag === "a") return "link";
+            if (tag === "button" || tag === "summary") return "button";
+            if (tag === "select") return "combobox";
+            if (tag === "textarea") return "textbox";
+            if (control instanceof HTMLInputElement) {
+              const type = control.type;
+              if (["button", "submit", "reset"].includes(type)) return "button";
+              if (type === "checkbox") return "checkbox";
+              if (type === "radio") return "radio";
+              return "textbox";
+            }
+            return undefined;
+          };
+          const accessibleName = collapse([
+            control.getAttribute("aria-label"),
+            control.getAttribute("title"),
+            control instanceof HTMLInputElement ? control.getAttribute("placeholder") : "",
+            control.textContent,
+            control.querySelector("img")?.getAttribute("alt"),
+          ].filter(Boolean).join(" ")).slice(0, 160);
+          const testId = control.getAttribute("data-testid") ?? control.getAttribute("data-test-id") ?? control.getAttribute("data-test") ?? undefined;
+          const elementId = control.id || undefined;
+          const fieldName = control.getAttribute("name") ?? undefined;
+          const text = collapse(control.textContent ?? "").slice(0, 120) || undefined;
+          const role = implicitRole();
+          const inDialog = Boolean(control.closest("[role=dialog], [aria-modal=true], dialog"));
+          let nth: number | undefined;
+          if (role && accessibleName) {
+            const sameName = [...document.querySelectorAll<HTMLElement>("a, button, summary, input, select, textarea, [role]")]
+              .filter((candidate) => {
+                const candidateRole = candidate.getAttribute("role")
+                  ?? (candidate.tagName === "A" ? "link" : candidate.tagName === "BUTTON" ? "button" : "");
+                const name = collapse([candidate.getAttribute("aria-label"), candidate.getAttribute("title"), candidate.textContent].filter(Boolean).join(" "));
+                return candidateRole === role && name === accessibleName;
+              });
+            if (sameName.length > 1) nth = Math.max(0, sameName.indexOf(control as HTMLElement));
+          }
+          return {
+            target: {
+              tag,
+              ...(label ? { label } : {}),
+              ...(anchor instanceof HTMLAnchorElement ? { href: anchor.href } : {}),
+            },
+            locator: {
+              tag,
+              ...(role ? { role } : {}),
+              ...(accessibleName ? { name: accessibleName } : {}),
+              ...(testId ? { testId } : {}),
+              ...(elementId ? { elementId } : {}),
+              ...(fieldName ? { fieldName } : {}),
+              ...(anchor instanceof HTMLAnchorElement ? { href: anchor.href } : {}),
+              ...(text ? { text } : {}),
+              ...(nth !== undefined ? { nth } : {}),
+              ...(inDialog ? { inDialog } : {}),
+            },
+          };
+        }, { x: action.x ?? 0, y: action.y ?? 0 });
+        target = captured?.target;
+        locator = captured?.locator;
+      } else if (action.actor === "agent" && action.type === "type") {
+        target = await this.page.evaluate(() => {
+          const control = document.activeElement;
+          if (!(control instanceof Element)) return undefined;
+          const label = [
+            control.getAttribute("aria-label"),
+            control.getAttribute("title"),
+            control.getAttribute("placeholder"),
+            control.getAttribute("name"),
+          ].filter(Boolean).join(" ").trim().replace(/\s+/g, " ").slice(0, 160);
+          return { tag: control.tagName.toLocaleLowerCase(), ...(label ? { label } : {}) };
+        });
+      }
 
       try {
         this.lastMutationAt = Date.now();
@@ -424,9 +680,29 @@ class BrowserManager {
         }
         this.frameRevision += 1;
         store.setBrowser("ready", this.page.url());
+        if (options.recordHistory !== false) {
+          await runHistoryRecorder.recordAction({
+            action,
+            beforeUrl,
+            afterUrl: this.page.url(),
+            beforeFrameRevision,
+            afterFrameRevision: this.frameRevision,
+            ...(target ? { target } : {}),
+            ...(locator ? { locator } : {}),
+            startedAt,
+            completedAt: new Date().toISOString(),
+          });
+        }
       } catch (error) {
         store.setBrowser("ready", this.page.url());
+        if (action.actor === "agent" && options.recordHistory !== false) {
+          await runHistoryRecorder.discardFailedRun().catch((historyError) => {
+            store.addProcessLog("system", "error", "失敗した操作の部分履歴を破棄できませんでした", historyError instanceof Error ? historyError.message : undefined);
+          });
+        }
         throw error;
+      } finally {
+        this.suppressActivity = previousSuppressActivity;
       }
     });
   }
@@ -453,7 +729,7 @@ class BrowserManager {
     await this.page.mouse.click(x, y);
     await this.page.waitForTimeout(150);
 
-    if (link) {
+    if (link && !this.suppressActivity) {
       store.addActivity({
         sessionId: store.snapshot().sessionId,
         operationId,

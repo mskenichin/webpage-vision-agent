@@ -1,4 +1,4 @@
-import type { ActivityEvent, AppState, ApprovalRequest, BrowserAction, BrowserStatus, ChatMessage, ProcessLog, Profile } from "./domain";
+import type { ActivityEvent, AppState, ApprovalRequest, BrowserAction, BrowserStatus, ChatMessage, ProcessLog, Profile, ReplayProgress } from "./domain";
 import { mergeInterests } from "./interests";
 
 const initialProfile: Profile = {
@@ -11,6 +11,7 @@ const initialProfile: Profile = {
   passengers: 5,
   priorities: "安全性、荷室、快適性",
   activityCollection: true,
+  runHistoryCollection: true,
 };
 
 function createState(): AppState {
@@ -32,6 +33,7 @@ function createState(): AppState {
     processLogs: [],
     approval: null,
     agentMode: process.env.AZURE_FOUNDRY_ENDPOINT && (process.env.AZURE_COMPUTER_MODEL || process.env.AZURE_CHAT_MODEL) ? "foundry" : "demo",
+    replay: null,
   };
 }
 
@@ -61,6 +63,10 @@ export class DemoStore {
   setBrowser(status: BrowserStatus, currentUrl?: string) {
     this.state.browserStatus = status;
     if (currentUrl) this.state.currentUrl = currentUrl;
+  }
+
+  setReplay(replay: ReplayProgress | null) {
+    this.state.replay = replay ? structuredClone(replay) : null;
   }
 
   setApproval(pending: PendingApproval) {
@@ -170,6 +176,7 @@ export const store = compatibleStore
   && typeof compatibleStore.clearMessages === "function"
   && typeof compatibleStore.clearConversation === "function"
   && typeof compatibleStore.addProcessLog === "function"
+  && typeof compatibleStore.setReplay === "function"
   ? compatibleStore
   : new DemoStore();
 if (process.env.NODE_ENV !== "production") globalThis.webpageVisionStore = store;

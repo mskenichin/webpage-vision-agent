@@ -4,6 +4,7 @@ import { browserTaskRequest, requiresBrowserTask, runBrowserTask } from "./brows
 import { runComputerUse } from "./computer-use";
 import { delegateComplexQuery } from "./delegation";
 import { requestFoundryResponse } from "./foundry";
+import { runHistoryRecorder } from "./run-history-recorder";
 import { store } from "./store";
 import { runTaskMode } from "./task-mode";
 import type { ExecutionMode } from "./domain";
@@ -29,7 +30,7 @@ function profileContext() {
   return "ご希望に合う情報をLexus公式サイトで探します。";
 }
 
-export async function runAgent(prompt: string, executionMode: ExecutionMode = "normal") {
+async function runAgentCore(prompt: string, executionMode: ExecutionMode) {
   store.addProcessLog("agent", "info", `テキスト要求の処理を開始しました (${executionMode === "task" ? "タスクモード" : "通常モード"})`);
   store.setBrowser("agent_running");
   const state = store.snapshot();
@@ -100,5 +101,38 @@ export async function runAgent(prompt: string, executionMode: ExecutionMode = "n
     const response = `${mode}${operation} ${profileContext()}`;
     store.addProcessLog("agent", "error", "LLM応答を取得できなかったため代替応答を生成しました", response);
     return response;
+  }
+}
+
+export async function runAgent(
+  prompt: string,
+  executionMode: ExecutionMode = "normal",
+  fallbackFromRunId?: string,
+  continueHistory = false,
+  recordHistory = true,
+) {
+  const runId = recordHistory
+    ? (continueHistory ? runHistoryRecorder.currentRunId() : null) ?? await runHistoryRecorder.begin(prompt, executionMode, fallbackFromRunId).catch((error) => {
+    store.addProcessLog("system", "error", "操作履歴の記録を開始できませんでした", error instanceof Error ? error.message : undefined);
+    return null;
+    })
+    : null;
+  try {
+    const result = await runAgentCore(prompt, executionMode);
+    const remainsActive = result === TASK_CONTINUATION_MESSAGE || store.snapshot().browserStatus === "awaiting_approval";
+    if (runId && !remainsActive) {
+      await runHistoryRecorder.finish(runId, "completed").catch((error) => {
+        store.addProcessLog("system", "error", "操作履歴を確定できませんでした", error instanceof Error ? error.message : undefined);
+      });
+    }
+    return result;
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : "UNKNOWN_ERROR";
+    if (runId) {
+      await runHistoryRecorder.finish(runId, reason === "AGENT_STOPPED" ? "stopped" : "failed", reason).catch((historyError) => {
+        store.addProcessLog("system", "error", "失敗した操作履歴を確定できませんでした", historyError instanceof Error ? historyError.message : undefined);
+      });
+    }
+    throw error;
   }
 }
