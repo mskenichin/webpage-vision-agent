@@ -584,17 +584,40 @@ class BrowserManager {
             }
             return undefined;
           };
-          const accessibleName = collapse([
+          const associatedLabel = (() => {
+            const labelledby = control.getAttribute("aria-labelledby");
+            if (labelledby) {
+              const text = collapse(labelledby.split(/\s+/).map((id) => document.getElementById(id)?.textContent ?? "").join(" "));
+              if (text) return text;
+            }
+            const wrapping = control.closest("label");
+            if (wrapping) {
+              const text = collapse(wrapping.textContent ?? "");
+              if (text) return text;
+            }
+            if (control.id) {
+              const forLabel = document.querySelector(`label[for="${CSS.escape(control.id)}"]`);
+              const text = forLabel ? collapse(forLabel.textContent ?? "") : "";
+              if (text) return text;
+            }
+            const row = control.closest("li, tr, [role=listitem], [role=option], [role=row]");
+            if (row) {
+              const text = collapse(row.textContent ?? "");
+              if (text) return text;
+            }
+            return "";
+          })();
+          const accessibleName = (collapse([
             control.getAttribute("aria-label"),
             control.getAttribute("title"),
             control instanceof HTMLInputElement ? control.getAttribute("placeholder") : "",
             control.textContent,
             control.querySelector("img")?.getAttribute("alt"),
-          ].filter(Boolean).join(" ")).slice(0, 160);
+          ].filter(Boolean).join(" ")) || associatedLabel).slice(0, 160);
           const testId = control.getAttribute("data-testid") ?? control.getAttribute("data-test-id") ?? control.getAttribute("data-test") ?? undefined;
           const elementId = control.id || undefined;
           const fieldName = control.getAttribute("name") ?? undefined;
-          const text = collapse(control.textContent ?? "").slice(0, 120) || undefined;
+          const text = (collapse(control.textContent ?? "") || associatedLabel).slice(0, 120) || undefined;
           const role = implicitRole();
           const inDialog = Boolean(control.closest("[role=dialog], [aria-modal=true], dialog"));
           let nth: number | undefined;
