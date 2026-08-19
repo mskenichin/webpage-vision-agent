@@ -82,8 +82,8 @@ function stoppedResult(completedSteps: number): ReplayResult {
 
 function bridgeGoal(recorded: AgentRunHistory["actions"][number]) {
   const label = recorded.locator?.name || recorded.target?.label || "";
-  const control = label ? `「${label}」を操作` : "現在の画面を操作";
-  return `${control}して次の画面へ進んでください。目的の画面URLは ${recorded.afterUrl} です。外部送信、購入、予約、問い合わせ、個人情報入力はしないでください。`;
+  const control = label ? `画面内の「${label}」` : "画面内の該当する操作";
+  return `${control}を操作して次の段階へ進めてください。ページ内のボタンやリンクだけを使い、アドレスバーやURLの直接入力、文字入力は行わないでください。外部送信、購入、予約、問い合わせ、個人情報入力もしないでください。`;
 }
 
 export function stopReplay() {
@@ -185,6 +185,7 @@ export async function replayRun(runId: string, dependencies: ReplayDependencies 
         store.addProcessLog("browser", "info", `リプレイ #${recorded.sequence}: AIに1手だけ引き継ぎます`, recorded.afterUrl);
         store.setReplay({ runId, status: "falling_back", currentStep: recorded.sequence, totalSteps: run.actions.length, message: `AIがステップ${recorded.sequence}を補助しています` });
         await dependencies.fallback(bridgeGoal(recorded), "normal", run.id, false).catch(() => undefined);
+        store.clearApproval();
         await dependencies.browser.settle();
         if (!samePath(store.snapshot().currentUrl, recorded.afterUrl)) {
           store.addProcessLog("browser", "error", `リプレイ #${recorded.sequence}: AI補助後も遷移先に到達できません`, `expected=${recorded.afterUrl} actual=${store.snapshot().currentUrl}`);

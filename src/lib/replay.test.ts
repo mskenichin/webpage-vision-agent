@@ -232,7 +232,8 @@ describe("replayRun", () => {
 
     await expect(replayRun(run.id, deps)).resolves.toMatchObject({ ok: true, status: "completed", completedSteps: 2 });
     expect(fallback).toHaveBeenCalledTimes(1);
-    expect(fallback.mock.calls[0][0]).toContain(optionUrl);
+    expect(fallback.mock.calls[0][0]).toContain("選択");
+    expect(fallback.mock.calls[0][0]).not.toContain("http");
     expect(fallback.mock.calls[0][1]).toBe("normal");
   });
 
